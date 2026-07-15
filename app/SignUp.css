@@ -1,0 +1,511 @@
+:root {
+  --slaw-blue: #5b83e3;
+  --slaw-blue-dark: #315ebd;
+  --slaw-blue-soft: #adc2f1;
+  --slaw-ink: #17213b;
+  --slaw-muted: #667085;
+  --slaw-line: #d8deea;
+  --white: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  min-height: 100%;
+  background: var(--slaw-blue);
+}
+
+body {
+  min-height: 100%;
+  margin: 0;
+  background: var(--slaw-blue);
+  color: var(--slaw-ink);
+  font-family: Arial, Helvetica, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button,
+a,
+input[type="checkbox"] {
+  -webkit-tap-highlight-color: transparent;
+}
+
+a {
+  color: inherit;
+}
+
+.auth-page {
+  min-height: 100vh;
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  padding: 48px;
+  background: var(--slaw-blue);
+}
+
+.auth-shell {
+  width: min(1180px, 100%);
+  min-height: 680px;
+  display: grid;
+  grid-template-columns: 38% 62%;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.34);
+  border-radius: 32px;
+  box-shadow: 0 28px 70px rgba(25, 54, 126, 0.25);
+}
+
+.signup-shell {
+  min-height: 780px;
+}
+
+.brand-panel {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 70px 58px 46px;
+  background: var(--slaw-blue-soft);
+}
+
+.eyebrow {
+  margin: 0 0 16px;
+  color: var(--slaw-blue-dark);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+.brand-copy h1 {
+  max-width: 330px;
+  margin: 0;
+  font-size: clamp(32px, 2.8vw, 40px);
+  font-weight: 700;
+  letter-spacing: -0.045em;
+  line-height: 1.08;
+}
+
+.brand-copy h1 span {
+  display: block;
+  color: var(--slaw-blue-dark);
+}
+
+.brand-copy h1 .title-line {
+  color: var(--slaw-ink);
+  white-space: nowrap;
+}
+
+.brand-description {
+  max-width: 320px;
+  margin: 24px 0 0;
+  color: #3f4f73;
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.brand-footer {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.wordmark {
+  width: fit-content;
+  min-width: 148px;
+  padding: 20px 22px;
+  border-radius: 24px 24px 24px 8px;
+  background: var(--slaw-blue);
+  color: var(--white);
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: -0.06em;
+  line-height: 1;
+  box-shadow: 0 14px 26px rgba(49, 94, 189, 0.23);
+}
+
+.wordmark span {
+  font-size: 42px;
+}
+
+.brand-footer p {
+  margin: 0 0 4px;
+  color: #53658b;
+  font-size: 12px;
+}
+
+.form-panel {
+  min-width: 0;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 70px 56px 96px;
+  background: var(--white);
+}
+
+.signup-panel {
+  padding-block: 54px;
+}
+
+.form-wrap {
+  width: min(420px, 100%);
+}
+
+.form-heading {
+  margin-bottom: 36px;
+}
+
+.signup-heading {
+  margin-bottom: 26px;
+}
+
+.form-heading h2 {
+  margin: 0;
+  font-size: 36px;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  line-height: 1.15;
+}
+
+.form-heading > p:last-child {
+  margin: 12px 0 0;
+  color: var(--slaw-muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.auth-form {
+  display: grid;
+  gap: 22px;
+}
+
+.signup-form {
+  gap: 15px;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+}
+
+.field label {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.field input[type="email"],
+.field input[type="password"],
+.field input[type="text"] {
+  width: 100%;
+  height: 52px;
+  border: 1px solid var(--slaw-line);
+  border-radius: 12px;
+  outline: none;
+  background: #fbfcff;
+  color: var(--slaw-ink);
+  padding: 0 15px;
+  font-size: 14px;
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.field input::placeholder {
+  color: #98a2b3;
+}
+
+.field input:focus {
+  border-color: var(--slaw-blue);
+  background: var(--white);
+  box-shadow: 0 0 0 4px rgba(91, 131, 227, 0.13);
+}
+
+.field input.input-error {
+  border-color: #d64545;
+}
+
+.password-field {
+  position: relative;
+}
+
+.password-field input {
+  padding-right: 66px !important;
+}
+
+.password-toggle {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  border: 0;
+  background: transparent;
+  color: var(--slaw-blue-dark);
+  padding: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+
+.form-options {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: -2px;
+  color: var(--slaw-muted);
+  font-size: 12px;
+}
+
+.check-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--slaw-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.check-option input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--slaw-blue);
+}
+
+.terms-option {
+  align-items: flex-start;
+}
+
+.form-options a,
+.switch-copy a,
+.terms-option a {
+  color: var(--slaw-blue-dark);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.form-options a:hover,
+.switch-copy a:hover,
+.terms-option a:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.submit-button {
+  width: 100%;
+  height: 52px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--slaw-blue);
+  color: var(--white);
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 10px 20px rgba(49, 94, 189, 0.2);
+  transition: background 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+}
+
+.submit-button:hover:not(:disabled) {
+  background: var(--slaw-blue-dark);
+  box-shadow: 0 12px 24px rgba(49, 94, 189, 0.26);
+  transform: translateY(-1px);
+}
+
+.submit-button:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.submit-button:disabled {
+  background: #e5e7eb;
+  color: #ffffff;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.switch-copy {
+  margin: 0;
+  text-align: center;
+  color: var(--slaw-muted);
+  font-size: 12px;
+}
+
+.form-message {
+  min-height: 18px;
+  margin: -8px 0 0;
+  color: #3f7a56;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.field-error {
+  min-height: 16px;
+  margin: -4px 0 -8px;
+  color: #b42318;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.legal-copy {
+  position: absolute;
+  right: 40px;
+  bottom: 28px;
+  left: 40px;
+  margin: 0;
+  color: #98a2b3;
+  font-size: 10px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+@media (max-width: 900px) {
+  .auth-page {
+    padding: 28px;
+  }
+
+  .auth-shell {
+    grid-template-columns: 34% 66%;
+    min-height: 620px;
+  }
+
+  .signup-shell {
+    min-height: 760px;
+  }
+
+  .brand-panel {
+    padding: 54px 34px 40px;
+  }
+
+  .brand-copy h1 {
+    font-size: 28px;
+  }
+
+  .brand-description,
+  .brand-footer p {
+    display: none;
+  }
+
+  .form-panel {
+    padding-inline: 46px;
+  }
+}
+
+@media (max-width: 680px) {
+  .auth-page {
+    display: block;
+    min-height: 100svh;
+    padding: 0;
+    background: var(--white);
+  }
+
+  .auth-shell {
+    width: 100%;
+    min-height: 100svh;
+    display: block;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .brand-panel {
+    min-height: 210px;
+    padding: 34px 24px 30px;
+  }
+
+  .brand-copy h1 {
+    max-width: 280px;
+    font-size: 31px;
+  }
+
+  .brand-copy h1 .title-line {
+    white-space: normal;
+  }
+
+  .brand-copy .eyebrow,
+  .brand-description {
+    display: none;
+  }
+
+  .brand-footer {
+    position: absolute;
+    top: 28px;
+    right: 24px;
+  }
+
+  .wordmark {
+    min-width: auto;
+    padding: 12px 14px;
+    border-radius: 15px 15px 15px 5px;
+    font-size: 20px;
+  }
+
+  .wordmark span {
+    font-size: 26px;
+  }
+
+  .form-panel,
+  .signup-panel {
+    min-height: calc(100svh - 210px);
+    display: block;
+    padding: 42px 24px 84px;
+  }
+
+  .form-wrap {
+    width: 100%;
+  }
+
+  .form-heading {
+    margin-bottom: 28px;
+  }
+
+  .form-heading h2 {
+    font-size: 32px;
+  }
+
+  .legal-copy {
+    right: 24px;
+    bottom: 26px;
+    left: 24px;
+  }
+}
+
+@media (max-width: 390px) {
+  .brand-panel {
+    min-height: 188px;
+  }
+
+  .brand-copy h1 {
+    max-width: 220px;
+    font-size: 27px;
+  }
+
+  .form-panel,
+  .signup-panel {
+    min-height: calc(100svh - 188px);
+  }
+
+  .form-options {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

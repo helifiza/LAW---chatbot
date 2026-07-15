@@ -1,0 +1,458 @@
+@import "tailwindcss";
+
+:root {
+  --blue: #5b83e3;
+  --blue-dark: #315ebd;
+  --blue-soft: #adc2f1;
+  --ink: #17213b;
+  --muted: #667085;
+  --line: #d8deea;
+  --white: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+}
+
+body {
+  margin: 0;
+  background: var(--blue);
+  color: var(--ink);
+  font-family: Arial, Helvetica, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button,
+a,
+input[type="checkbox"] {
+  -webkit-tap-highlight-color: transparent;
+}
+
+a {
+  color: inherit;
+}
+
+.login-page {
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  padding: 48px;
+  background-color: var(--blue);
+}
+
+.login-shell {
+  width: min(1180px, 100%);
+  min-height: 680px;
+  display: grid;
+  grid-template-columns: 38% 62%;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.34);
+  border-radius: 32px;
+  box-shadow: 0 28px 70px rgba(25, 54, 126, 0.25);
+}
+
+.brand-panel {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 70px 58px 46px;
+  background: var(--blue-soft);
+}
+
+.eyebrow {
+  margin: 0 0 16px;
+  color: var(--blue-dark);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+.brand-copy h1 {
+  max-width: 330px;
+  margin: 0;
+  font-size: clamp(32px, 2.8vw, 40px);
+  font-weight: 700;
+  letter-spacing: -0.045em;
+  line-height: 1.08;
+}
+
+.brand-copy h1 span {
+  display: block;
+  color: var(--blue-dark);
+}
+
+.brand-copy h1 .title-line {
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.brand-description {
+  max-width: 320px;
+  margin: 24px 0 0;
+  color: #3f4f73;
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.brand-footer {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.wordmark {
+  width: fit-content;
+  min-width: 148px;
+  padding: 20px 22px;
+  border-radius: 24px 24px 24px 8px;
+  background: var(--blue);
+  color: var(--white);
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: -0.06em;
+  line-height: 1;
+  box-shadow: 0 14px 26px rgba(49, 94, 189, 0.23);
+}
+
+.wordmark span {
+  font-size: 42px;
+}
+
+.brand-footer p {
+  margin: 0 0 4px;
+  color: #53658b;
+  font-size: 12px;
+}
+
+.form-panel {
+  min-width: 0;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 70px 56px 96px;
+  background: var(--white);
+}
+
+.form-wrap {
+  width: min(420px, 100%);
+}
+
+.form-heading {
+  margin-bottom: 36px;
+}
+
+.form-heading h2 {
+  margin: 0;
+  font-size: 36px;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  line-height: 1.15;
+}
+
+.form-heading > p:last-child {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.login-form {
+  display: grid;
+  gap: 22px;
+}
+
+.field {
+  display: grid;
+  gap: 9px;
+}
+
+.field label {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.field input[type="email"],
+.field input[type="password"],
+.field input[type="text"] {
+  width: 100%;
+  height: 52px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  outline: none;
+  background: #fbfcff;
+  color: var(--ink);
+  padding: 0 15px;
+  font-size: 14px;
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.field input::placeholder {
+  color: #98a2b3;
+}
+
+.field input:focus {
+  border-color: var(--blue);
+  background: var(--white);
+  box-shadow: 0 0 0 4px rgba(91, 131, 227, 0.13);
+}
+
+.password-field {
+  position: relative;
+}
+
+.password-field input {
+  padding-right: 66px !important;
+}
+
+.password-toggle {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  border: 0;
+  background: transparent;
+  color: var(--blue-dark);
+  padding: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+
+.form-options {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: -2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.remember {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.remember input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--blue);
+}
+
+.form-options a,
+.signup-copy a {
+  color: var(--blue-dark);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.form-options a:hover,
+.signup-copy a:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.submit-button {
+  width: 100%;
+  height: 52px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--blue);
+  color: var(--white);
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 10px 20px rgba(49, 94, 189, 0.2);
+  transition: background 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+}
+
+.submit-button:hover {
+  background: var(--blue-dark);
+  box-shadow: 0 12px 24px rgba(49, 94, 189, 0.26);
+  transform: translateY(-1px);
+}
+
+.submit-button:active {
+  transform: translateY(0);
+}
+
+.signup-copy {
+  margin: 0;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.form-message {
+  min-height: 18px;
+  margin: -8px 0 0;
+  color: #3f7a56;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.legal-copy {
+  position: absolute;
+  right: 40px;
+  bottom: 28px;
+  left: 40px;
+  margin: 0;
+  color: #98a2b3;
+  font-size: 10px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+@media (max-width: 900px) {
+  .login-page {
+    padding: 28px;
+  }
+
+  .login-shell {
+    grid-template-columns: 34% 66%;
+    min-height: 620px;
+  }
+
+  .brand-panel {
+    padding: 54px 34px 40px;
+  }
+
+  .brand-copy h1 {
+    font-size: 28px;
+  }
+
+  .brand-description,
+  .brand-footer p {
+    display: none;
+  }
+
+  .form-panel {
+    padding-inline: 46px;
+  }
+}
+
+@media (max-width: 680px) {
+  .login-page {
+    display: block;
+    min-height: 100svh;
+    padding: 0;
+    background: var(--white);
+  }
+
+  .login-shell {
+    width: 100%;
+    min-height: 100svh;
+    display: block;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .brand-panel {
+    min-height: 220px;
+    padding: 34px 24px 30px;
+  }
+
+  .brand-copy h1 {
+    max-width: 280px;
+    font-size: 31px;
+  }
+
+  .brand-copy h1 .title-line {
+    white-space: normal;
+  }
+
+  .brand-copy .eyebrow,
+  .brand-description {
+    display: none;
+  }
+
+  .brand-footer {
+    position: absolute;
+    top: 28px;
+    right: 24px;
+  }
+
+  .wordmark {
+    min-width: auto;
+    padding: 12px 14px;
+    border-radius: 15px 15px 15px 5px;
+    font-size: 20px;
+  }
+
+  .wordmark span {
+    font-size: 26px;
+  }
+
+  .form-panel {
+    min-height: calc(100svh - 220px);
+    display: block;
+    padding: 44px 24px 88px;
+  }
+
+  .form-wrap {
+    width: 100%;
+  }
+
+  .form-heading {
+    margin-bottom: 30px;
+  }
+
+  .form-heading h2 {
+    font-size: 32px;
+  }
+
+  .legal-copy {
+    right: 24px;
+    bottom: 26px;
+    left: 24px;
+  }
+}
+
+@media (max-width: 390px) {
+  .brand-panel {
+    min-height: 190px;
+  }
+
+  .brand-copy h1 {
+    max-width: 220px;
+    font-size: 27px;
+  }
+
+  .form-panel {
+    min-height: calc(100svh - 190px);
+  }
+
+  .form-options {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
