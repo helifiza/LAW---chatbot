@@ -1,5 +1,7 @@
 "use client";
+
 import "./Login.css";
+import Link from "next/link";
 import { useState, type FormEvent } from "react";
 
 
@@ -92,9 +94,7 @@ export default function Home() {
                 Đăng nhập
               </button>
 
-              <p className="signup-copy">
-                Chưa có tài khoản? <a href="#signup">Đăng ký ngay</a>
-              </p>
+              <p className="signup-copy">Chưa có tài khoản?{" "}<Link href="/SignUp">Đăng ký ngay</Link></p>
               <p className="form-message" role="status" aria-live="polite">
                 {message}
               </p>
