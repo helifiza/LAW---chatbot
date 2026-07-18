@@ -2,16 +2,59 @@
 
 import "./Login.css";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 
+async function requestLogin({ email, password }: { email: string; password: string }) {
+  const endpoint = process.env.NEXT_PUBLIC_AUTH_API_URL;
 
-export default function Home() {
+  if (!endpoint) {
+    // Chế độ demo: chưa nối backend thì chỉ cần có email + password là coi như thành công
+    await new Promise((resolve) => window.setTimeout(resolve, 650));
+    if (!email || !password) {
+      throw new Error("Vui lòng nhập đầy đủ email và mật khẩu.");
+    }
+    return { success: true, demo: true };
+  }
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Đăng nhập thất bại.");
+  }
+  return payload;
+}
+
+export default function LoginPage() {
+  const router = useRouter();
   const [showPassword, setShowPassword] = useState(false);
   const [message, setMessage] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setMessage("Giao diện đã sẵn sàng để kết nối với API đăng nhập của SLaw.");
+    if (isSubmitting) return;
+
+    const form = event.currentTarget;
+    const email = (form.elements.namedItem("email") as HTMLInputElement).value;
+    const password = (form.elements.namedItem("password") as HTMLInputElement).value;
+
+    setIsSubmitting(true);
+    setMessage("");
+
+    try {
+      await requestLogin({ email, password });
+      setMessage("Đăng nhập thành công. Đang chuyển đến trang chính…");
+      router.push("/Home");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Đăng nhập thất bại.");
+    } finally {
+      setIsSubmitting(false);
+    }
   }
 
   return (
@@ -90,11 +133,13 @@ export default function Home() {
                 <a href="#forgot-password">Quên mật khẩu?</a>
               </div>
 
-              <button className="submit-button" type="submit">
-                Đăng nhập
+              <button className="submit-button" type="submit" disabled={isSubmitting}>
+                {isSubmitting ? "Đang đăng nhập…" : "Đăng nhập"}
               </button>
 
-              <p className="signup-copy">Chưa có tài khoản?{" "}<Link href="/SignUp">Đăng ký ngay</Link></p>
+              <p className="signup-copy">
+                Chưa có tài khoản? <Link href="/SignUp">Đăng ký ngay</Link>
+              </p>
               <p className="form-message" role="status" aria-live="polite">
                 {message}
               </p>
