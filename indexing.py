@@ -1,3 +1,4 @@
+#CODE CHECK GIAI ĐOẠN 1+2
 """Indexing tài liệu pháp luật theo Chương/Mục/Điều.
 
 Điểm quan trọng của pipeline này:
@@ -89,10 +90,9 @@ PATTERN_DIEU = re.compile(
 HEADING_NEXT = (
     r"[ \t]*(?:"
     r"CHƯƠNG[ \t]+[IVXLCDM\d]+"
-    r"|Mục[ \t]+\d+[A-Za-z]?(?:[.:-])?"
+    r"|Mục[ \t]+\d+[A-Za-z]?"
+        r"(?:[ \t]*[.:-]|(?=[ \t]*(?:\r?\n|\f|$)))"
     r"|Điều[ \t]+\d+[A-Za-z]?[ \t]*[.:-]"
-    # Không đặt \b sau toàn bộ nhóm: dấu chấm là ký tự non-word nên
-    # chuỗi "Điều 1." theo sau bởi space không tạo word boundary.
     r")"
 )
 
@@ -150,13 +150,13 @@ class _NguonText:
     text: str
 
 
-def _kiem_tra_cau_hinh_chunk(max_chunk_chars: int, overlap_chars: int) -> None:
-    if max_chunk_chars <= 0:
-        raise ValueError("max_chunk_chars phải lớn hơn 0")
-    if overlap_chars < 0:
-        raise ValueError("overlap_chars không được âm")
-    if overlap_chars >= max_chunk_chars:
-        raise ValueError("overlap_chars phải nhỏ hơn max_chunk_chars")
+def _kiem_tra_cau_hinh_chunk(chunk_size: int, overlap_chunk: int) -> None:
+    if chunk_size <= 0:
+        raise ValueError("chunk_size phải lớn hơn 0")
+    if overlap_chunk < 0:
+        raise ValueError("overlap_chunk không được âm")
+    if overlap_chunk >= chunk_size:
+        raise ValueError("overlap_chunk phải nhỏ hơn chunk_size")
 
 
 def _ghep_text_va_vi_tri_trang(
@@ -192,7 +192,8 @@ class _khoiTho:
   dieu: Optional[str]
   text: str
   spans: List[Tuple[int,int,int]]
-
+#parsing gđ1:
+#chia chunk theo cấu trúc pháp luật
 def _chia_khoi_theo_cau_truc(
     pages: Sequence[Tuple[int,str]],
     remove_bare_page_numbers: bool,
@@ -201,7 +202,7 @@ def _chia_khoi_theo_cau_truc(
     current_chuong: Optional[str] = None
     current_muc: Optional[str] = None
     current_dieu: Optional[str] = None
-    buffer: List[_NguonText] = []
+    buffer: List[_NguonText] = []#gom các dòng thuộc một điều trước khi tro thanh _khoiTho nhưng chưa tạp chunk
 
     def flush_buffer() -> None:
       nonlocal buffer
@@ -251,7 +252,20 @@ def _chia_khoi_theo_cau_truc(
             buffer.append(_NguonText(page_number, line))
             continue
           buffer.append(_NguonText(page_number, line))
-    flush_buffer()
+    flush_buffer()#sau khi gom đủ text của 1 điều vào buffer thì cho vào flush_buffer để xử lý và làm rỗng buffer để nhận và xử lý điều tiếp theo
+
+    print("\n" + "=" * 80)
+    print("GIAI ĐOẠN 1 - KẾT QUẢ TÁCH THEO CẤU TRÚC CHƯƠNG/MỤC/ĐIỀU")
+    print("Tổng số khối thô:", len(khoi_list))
+    print("=" * 80)
+    for index, khoi in enumerate(khoi_list):
+        print(f"\n[khoi_list[{index}]]")
+        print("chuong:", khoi.chuong)
+        print("muc:", khoi.muc)
+        print("dieu:", khoi.dieu)
+        print("text:", khoi.text)
+        print("spans:", khoi.spans)
+
     return khoi_list
 
 # gđ2: nếu chunk ở gđ1 dài quá thì tiếp tục chunk nhỏ hơn(recursive)
@@ -295,25 +309,26 @@ def recursive_tach_thanh_manh(
     text: str,
     start: int,
     end: int,
-    max_chunk_chars: int,
+    chunk_size: int,
     tiers:Sequence["re.Pattern[str]"] = FINE_SPLIT_SEPARATORS,
+    tier_index: int = 0,
 )->List[Tuple[int, int]]:
-  if end - start <= max_chunk_chars:
+  if end - start <= chunk_size:
     return [(start, end)]
   if tier_index >= len(tiers):
     ket_qua: List[Tuple[int,int]] = []
     cursor = start
     while cursor < end:
-      piece_end = min(cursor + max_chunk_chars, end)
+      piece_end = min(cursor + chunk_size, end)
       ket_qua.append((cursor, piece_end))
       cursor = piece_end
     return ket_qua
   pieces = _tach_theo_1_tier(text, start, end, tiers[tier_index])
   if len(pieces) <= 1:
-    return recursive_tach_thanh_manh(text, start, end, max_chunk_chars, tiers, tier_index+1)
+    return recursive_tach_thanh_manh(text, start, end, chunk_size, tiers, tier_index+1)
   ket_qua = []
   for piece_start, piece_end in pieces:
-    if piece_end - piece_start <= max_chunk_chars:
+    if piece_end - piece_start <= chunk_size:
       ket_qua.append((piece_start, piece_end))
     else:
       ket_qua.extend(
@@ -321,7 +336,7 @@ def recursive_tach_thanh_manh(
               text,
               piece_start,
               piece_end,
-              max_chunk_chars,
+              chunk_size,
               tiers,
               tier_index + 1,
           )
@@ -336,22 +351,22 @@ def _tranh_cat_giua_tu(text: str, index: int, gioi_han_duoi: int, gioi_han_tren:
 def overlap(
     text: str,
     manh_nho: Sequence[Tuple[int,int]],
-    max_chunk_chars: int,
-    overla_chars: int,
+    chunk_size: int,
+    overlap_chunk: int,
 )->List[Tuple[int,int]]:
     if not manh_nho:
         return []
     chunks: List[Tuple[int,int]] = []
     chunk_start, chunk_end = manh_nho[0]
     for piece_start, piece_end in manh_nho[1:]:
-        if piece_end - chunk_start <= max_chunk_chars:
+        if piece_end - chunk_start <= chunk_size:
             chunk_end = piece_end
             continue
         chunks.append((chunk_start, chunk_end))
         new_start = max(
             chunk_start,
-            piece_end - max_chunk_chars,
-            chunk_end - overlap_chars,
+            piece_end - chunk_size,
+            chunk_end - overlap_chunk,
         )
         new_start = _tranh_cat_giua_tu(text, new_start, chunk_start, piece_start)
         chunk_start, chunk_end = new_start, piece_end
@@ -360,28 +375,60 @@ def overlap(
 
 def _chia_nhoi_khoi_tho(
     khoi: _khoiTho,
-    max_chunk_chars: int,
-    overlap_chars: int,
+    chunk_size: int,
+    overlap_chunk: int,
     fine_split_separators: Sequence["re.Pattern[str]"] = FINE_SPLIT_SEPARATORS,
 )-> List[Tuple[str, int, int]]:
     text = khoi.text
-    if len(text) <= max_chunk_chars:
-        start_page, end_page = khoi.spans[0][2], khoi.spans[-1][-2]
+
+    print("\n" + "=" * 80)
+    print("GIAI ĐOẠN 2 - XỬ LÝ MỘT KHỐI THÔ")
+    print("chuong:", khoi.chuong)
+    print("muc:", khoi.muc)
+    print("dieu:", khoi.dieu)
+    print("độ dài text:", len(text))
+    print("chunk_size:", chunk_size)
+    print("overlap_chunk:", overlap_chunk)
+    print("text:", text)
+    print("spans:", khoi.spans)
+
+    if len(text) <= chunk_size:
+        start_page, end_page = khoi.spans[0][2], khoi.spans[-1][2]
+        print("\nKết quả: khối không vượt giới hạn nên không cần chia nhỏ")
+        print("pieces:", [(text, start_page, end_page)])
         return [(text, start_page, end_page)]
 
     manh_nho = recursive_tach_thanh_manh(
         text,
         0,
         len(text),
-        max_chunk_chars,
+        chunk_size,
         fine_split_separators,
     )
+
+    print("\nCác mảnh nhỏ sau recursive_tach_thanh_manh:")
+    print("Tổng số mảnh nhỏ:", len(manh_nho))
+    for index, (start, end) in enumerate(manh_nho):
+        print(f"  manh_nho[{index}]:")
+        print("    start:", start)
+        print("    end:", end)
+        print("    text:", text[start:end])
+
     khoang_chunk = overlap(
         text,
         manh_nho,
-        max_chunk_chars,
-        overlap_chars
+        chunk_size,
+        overlap_chunk
     )
+
+    print("\nCác khoảng chunk sau khi thêm overlap:")
+    print("Tổng số khoảng chunk:", len(khoang_chunk))
+    for index, (start, end) in enumerate(khoang_chunk):
+        print(f"  khoang_chunk[{index}]:")
+        print("    start:", start)
+        print("    end:", end)
+        print("    text:", text[start:end])
+
     ket_qua: List[Tuple[str, int, int]] = []
     for start, end in khoang_chunk:
       piece = text[start:end].strip()
@@ -389,41 +436,50 @@ def _chia_nhoi_khoi_tho(
         continue
       start_page, end_page = _trang_cua_khoang(khoi.spans, start, end)
       ket_qua.append((piece, start_page, end_page))
+
+    print("\nKết quả cuối của giai đoạn 2 cho khối thô hiện tại:")
+    print("Tổng số pieces:", len(ket_qua))
+    for index, (piece, start_page, end_page) in enumerate(ket_qua):
+        print(f"  pieces[{index}]:")
+        print("    start_page:", start_page)
+        print("    end_page:", end_page)
+        print("    text:", piece)
+
     return ket_qua
 
 def trich_xuat_theo_trang(
-    pages: Sequence[Tuple[int, str]],
-    file_name: str,
-    document_id: Optional[str] = None,
-    max_chunk_chars: int = 5000,
-    overlap_chars: int = 150,
-    remove_bare_page_numbers: bool = False,
+    pages: Sequence[Tuple[int, str]],#int: số trang tương ứng có text gì
+    file_name: str,#tên file
+    document_id: Optional[str] = None,#id của file_name, tránh bị trùng lặp nếu upload >1 lần cùng 1 file, các chunk trong 1 file có cùng id_doc
+    chunk_size: int = 2500,#giới hạn kích thước tối đa của một chunk
+    overlap_chunk: int = 250,#overlap giữa 2 chunk
+    remove_bare_page_numbers: bool = False,#để xóa số trang
     fine_split_separators: Sequence["re.Pattern[str]"] = FINE_SPLIT_SEPARATORS,
 ) -> List[in4_detail]:
-    _kiem_tra_cau_hinh_chunk(max_chunk_chars, overlap_chars)
+    _kiem_tra_cau_hinh_chunk(chunk_size, overlap_chunk)#đảm bảo max_chunk> 0 và overlap<max_chunk
     doc_id = document_id or str(uuid.uuid4())
-    khoi_tho_list = _chia_khoi_theo_cau_truc(
+    khoi_tho_list = _chia_khoi_theo_cau_truc(#output của gđ1
         pages,
         remove_bare_page_numbers
     )
-    chunks: List[in4_detail] = []
-    for khoi in khoi_tho_list:
-        pieces = _chia_nhoi_khoi_tho(
+    chunks: List[in4_detail] = []#cuối cùng hàm trả về List[in4]
+    for khoi in khoi_tho_list:#khoi = 1 điều
+        pieces = _chia_nhoi_khoi_tho(#xem lại hàm này ở trên, hàm này có mục đích thực hiện gđ2
             khoi,
-            max_chunk_chars,
-            overlap_chars,
+            chunk_size,
+            overlap_chunk,
             fine_split_separators
         )
-        is_partial = len(pieces) > 1
+        is_partial = len(pieces) > 1#thuộc gđ2
         for text_piece, start_page, end_page in pieces:
             chunks.append(
                 in4_detail(
                     document_id=doc_id,
-                    element_id=str(uuid.uuid4()),
+                    element_id=str(uuid.uuid4()),#id của chunk
                     file_name=file_name,
                     page_number=start_page,
                     page_end_number = end_page,
-                    content_type= (
+                    content_type= (#CẦN FIX ĐOẠN NÀY ĐỂ CÓ THỂ XỬ LÝ PDF THỰC TẾ HƠN
                         "dieu_partial"
                         if khoi.dieu is not None and is_partial
                         else "paragraph"
@@ -435,15 +491,37 @@ def trich_xuat_theo_trang(
                     chunk_index = len(chunks),
                 )
             )
-    return chunks
+
+    print("\n" + "=" * 80)
+    print("KẾT QUẢ CUỐI CÙNG SAU 2 GIAI ĐOẠN - DANH SÁCH in4_detail")
+    print("Tổng số chunks:", len(chunks))
+    print("=" * 80)
+    for index, chunk in enumerate(chunks):
+        print(f"\n[chunks[{index}]]")
+        print("document_id:", chunk.document_id)
+        print("element_id:", chunk.element_id)
+        print("file_name:", chunk.file_name)
+        print("page_number:", chunk.page_number)
+        print("page_end_number:", chunk.page_end_number)
+        print("content_type:", chunk.content_type)
+        print("chuong:", chunk.chuong)
+        print("muc:", chunk.muc)
+        print("dieu:", chunk.dieu)
+        print("text:", chunk.text)
+        print("chunk_index:", chunk.chunk_index)
+        print("char_count:", chunk.char_count)
+        print("token_count:", chunk.token_count)
+        print("created_at:", chunk.created_at)
+
+    return chunks#đây là chunk cuối cùng sau 2 gđ
 
 def trich_xuat_smart(
     raw_text: str,
     file_name: str,
     page_number: int,
     document_id: Optional[str] = None,
-    max_chunk_chars: int = 5000,
-    overlap_chars: int = 150,
+    chunk_size: int = 2500,
+    overlap_chunk: int = 250,
 ) -> List[in4_detail]:
     """API tương thích cho text đơn hoặc một trang.
 
@@ -454,8 +532,8 @@ def trich_xuat_smart(
         pages=[(page_number, raw_text)],
         file_name=file_name,
         document_id=document_id,
-        max_chunk_chars=max_chunk_chars,
-        overlap_chars=overlap_chars,
+        chunk_size=chunk_size,
+        overlap_chunk=overlap_chunk,
         remove_bare_page_numbers=False,
     )
 
@@ -506,8 +584,8 @@ class so_sanh_doc:
 def xu_ly_pdf(
     file_path: str,
     document_id: Optional[str] = None,
-    max_chunk_chars: int = 5000,
-    overlap_chars: int = 150,
+    chunk_size: int = 2500,
+    overlap_chunk: int = 250,
 ) -> List[in4_detail]:
     """Đọc PDF rồi parse tất cả trang trong một luồng trạng thái duy nhất."""
     from pypdf import PdfReader
@@ -519,12 +597,21 @@ def xu_ly_pdf(
         for page_number, page in enumerate(reader.pages, start=1)
     ]
 
+    print("\n" + "=" * 80)
+    print("GIAI ĐOẠN ĐỌC PDF - TEXT TRÍCH XUẤT THEO TỪNG TRANG")
+    print("file_name:", file_name)
+    print("Tổng số trang:", len(pages))
+    print("=" * 80)
+    for page_number, page_text in pages:
+        print(f"\n[Trang {page_number}]")
+        print("text:", page_text)
+
     return trich_xuat_theo_trang(
         pages=pages,
         file_name=file_name,
         document_id=document_id,
-        max_chunk_chars=max_chunk_chars,
-        overlap_chars=overlap_chars,
+        chunk_size=chunk_size,
+        overlap_chunk=overlap_chunk,
         remove_bare_page_numbers=True,
     )
 
@@ -554,10 +641,32 @@ def _in_thong_ke(chunks: Sequence[in4_detail]) -> None:
         print("char_count:", chunk.char_count, "| token_count:", chunk.token_count)
         print("text:", chunk.text[:300].replace("\n", " "))
 
+def ghi_ra_file_txt(chunks: Sequence[in4_detail], output_path: str) -> None:
+    """Ghi toàn bộ chunks ra file .txt, không đổi logic xử lý."""
+    with open(output_path, "w", encoding="utf-8") as f:
+        for chunk in chunks:
+            f.write(f"[chunks[{chunk.chunk_index}]]\n")
+            f.write(f"document_id: {chunk.document_id}\n")
+            f.write(f"element_id: {chunk.element_id}\n")
+            f.write(f"file_name: {chunk.file_name}\n")
+            f.write(f"page_number: {chunk.page_number}\n")
+            f.write(f"page_end_number: {chunk.page_end_number}\n")
+            f.write(f"content_type: {chunk.content_type}\n")
+            f.write(f"chuong: {chunk.chuong}\n")
+            f.write(f"muc: {chunk.muc}\n")
+            f.write(f"dieu: {chunk.dieu}\n")
+            f.write(f"chunk_index: {chunk.chunk_index}\n")
+            f.write(f"char_count: {chunk.char_count}\n")
+            f.write(f"token_count: {chunk.token_count}\n")
+            f.write(f"created_at: {chunk.created_at}\n")
+            f.write("text:\n")
+            f.write(chunk.text + "\n")
+            f.write("\n" + "=" * 80 + "\n\n")
+    print(f"Đã ghi {len(chunks)} chunks ra file: {output_path}")
 
 if __name__ == "__main__":
     # Thay đường dẫn này bằng file cần kiểm thử.
-    file_path = r"/content/drive/MyDrive/Colab Notebooks/Thư viện luật/Luat-thue-thu-nhap-ca-nhan-nam-2025.pdf"
+    file_path = r"/content/drive/MyDrive/Colab Notebooks/Thư viện luật/Luật Hàng không dân dụng Việt Nam 2025.pdf"
     extension = os.path.splitext(file_path)[1].lower()
 
     if extension == ".pdf":
@@ -566,7 +675,9 @@ if __name__ == "__main__":
         raise ValueError(f"Chưa hỗ trợ file dạng: {extension}")
 
     _in_thong_ke(result)
-  
+    output_txt_path = r"/content/drive/MyDrive/Colab Notebooks/Thư viện luật/Luật Hàng không dân dụng Việt Nam 2025 ban pdf.txt"
+    ghi_ra_file_txt(result, output_txt_path)
+
   #trình tự thực hiện:
   #1: Xử lý pdf: đọc toàn bộ trang và trích xuất text theo trang, trích xuất đầy đủ text trong trang đó
   #2:hàm trích xuất theo trang được gọi-> trong hàm này gọi hàm chia khối theo câu
