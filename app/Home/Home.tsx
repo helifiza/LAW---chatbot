@@ -1,40 +1,41 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import "./Chat.css";
 import styles from "./Home.module.css";
+import {
+  ApiError,
+  askSessionQuestion,
+  clearSessionDocuments,
+  closeSession,
+  createSession,
+  deleteSessionDocument,
+  getSession,
+  uploadSessionDocuments,
+  type ApiDocument,
+  type SessionSnapshot,
+} from "./api";
 
 const MAX_FILES = 5;
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const ALLOWED_EXTENSIONS = ["pdf", "docx", "txt", "md", "csv", "json"];
+const SESSION_STORAGE_KEY = "slaw.rag.session_id";
 
-type MessageRole = "user" | "assistant";
-
+type MessageSource = { fileName: string; locator: string; excerpt: string };
 type Message = {
   id: string;
-  role: MessageRole;
+  role: "user" | "assistant";
   content: string;
   attachments?: string[];
-  sources?: Array<{ fileName: string; locator: string; excerpt: string }>;
-  demo?: boolean;
+  sources?: MessageSource[];
   error?: boolean;
-};
-
-type DocumentItem = {
-  id: string;
-  file: File;
-};
-
-type HistoryItem = {
-  role: MessageRole;
-  content: string;
-};
-
-type RAGAnswer = {
-  answer?: string;
-  sources?: Array<{ fileName: string; locator: string; excerpt: string }>;
-  demo?: boolean;
-  error?: string;
 };
 
 const INITIAL_MESSAGES: Message[] = [
@@ -42,7 +43,7 @@ const INITIAL_MESSAGES: Message[] = [
     id: "welcome",
     role: "assistant",
     content:
-      "Xin chào! Hãy tải tài liệu lên, sau đó đặt câu hỏi. Tôi sẽ trả lời dựa trên nội dung tài liệu và hiển thị rõ nguồn tham khảo.",
+      "Xin chào! Hãy tải tài liệu lên, chờ hệ thống lập chỉ mục, sau đó đặt câu hỏi. Phiên hiện tại sẽ giữ tài liệu và lịch sử chat khi bạn tải lại trang.",
   },
 ];
 
@@ -57,12 +58,6 @@ const ICONS: Record<string, ReactNode> = {
     <>
       <path d="M12 5v14" />
       <path d="M5 12h14" />
-    </>
-  ),
-  search: (
-    <>
-      <circle cx="11" cy="11" r="7" />
-      <path d="m20 20-4-4" />
     </>
   ),
   upload: (
@@ -99,7 +94,9 @@ const ICONS: Record<string, ReactNode> = {
   ),
   menu: <path d="M4 7h16M4 12h16M4 17h16" />,
   close: <path d="m6 6 12 12M18 6 6 18" />,
-  clip: <path d="m20 11-8.5 8.5a5 5 0 0 1-7-7L14 3a3.5 3.5 0 0 1 5 5l-9.5 9.5a2 2 0 0 1-3-3L15 6" />,
+  clip: (
+    <path d="m20 11-8.5 8.5a5 5 0 0 1-7-7L14 3a3.5 3.5 0 0 1 5 5l-9.5 9.5a2 2 0 0 1-3-3L15 6" />
+  ),
   send: (
     <>
       <path d="m22 2-7 20-4-9-9-4z" />
@@ -126,7 +123,15 @@ const ICONS: Record<string, ReactNode> = {
   ),
 };
 
-function Icon({ name, size = 20, strokeWidth = 1.8 }: { name: string; size?: number; strokeWidth?: number }) {
+function Icon({
+  name,
+  size = 20,
+  strokeWidth = 1.8,
+}: {
+  name: string;
+  size?: number;
+  strokeWidth?: number;
+}) {
   return (
     <svg
       aria-hidden="true"
@@ -145,115 +150,135 @@ function Icon({ name, size = 20, strokeWidth = 1.8 }: { name: string; size?: num
 }
 
 function makeId() {
-  if (typeof crypto !== "undefined" && crypto.randomUUID) {
-    return crypto.randomUUID();
-  }
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function fileId(file: File) {
-  return `${file.name}-${file.size}-${file.lastModified}`;
+function fileSignature(file: File) {
+  return `${file.name}-${file.size}`;
 }
-
 function extensionOf(fileName: string) {
   return fileName.split(".").pop()?.toLowerCase() || "";
 }
-
 function formatFileSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
-
-/**
- * Điểm nối backend RAG của bạn.
- *
- * Backend nên nhận multipart/form-data gồm:
- * - question: string
- * - history: JSON string
- * - files: File[]
- *
- * Và trả JSON:
- * {
- *   answer: string,
- *   sources: [{ fileName, locator, excerpt }]
- * }
- */
-async function requestRagAnswer({ question, files, history }: { question: string; files: DocumentItem[]; history: HistoryItem[] }) {
-  const endpoint = process.env.NEXT_PUBLIC_RAG_API_URL;
-
-  if (!endpoint) {
-    await new Promise((resolve) => window.setTimeout(resolve, 650));
-    return {
-      answer:
-        `Đây là phản hồi mẫu cho câu hỏi: “${question}”.\n\n` +
-        "Khi bạn nối backend RAG, nội dung trả lời thực tế sẽ xuất hiện tại chính khung này, kèm các nguồn được backend gửi về.",
-      sources: files.slice(0, 2).map((item, index) => ({
-        fileName: item.file.name,
-        locator: `Nguồn mẫu ${index + 1}`,
-        excerpt: "Đoạn nội dung trích dẫn từ tài liệu sẽ được hiển thị tại đây.",
-      })),
-      demo: true,
-    };
+function documentStatus(document: ApiDocument) {
+  if (document.status === "processing") return "Đang lập chỉ mục";
+  if (document.status === "failed") return "Lỗi lập chỉ mục";
+  return `${document.chunk_count} đoạn đã index`;
+}
+function messagesFromSnapshot(snapshot: SessionSnapshot): Message[] {
+  return [
+    ...INITIAL_MESSAGES,
+    ...snapshot.messages.map((message) => ({
+      id: `server-${message.id}`,
+      role: message.role,
+      content: message.content,
+    })),
+  ];
+}
+async function restoreOrCreateSession(): Promise<SessionSnapshot> {
+  const stored = window.localStorage.getItem(SESSION_STORAGE_KEY);
+  if (stored) {
+    try {
+      return await getSession(stored);
+    } catch (error) {
+      if (!(error instanceof ApiError) || ![404, 410].includes(error.status))
+        throw error;
+      window.localStorage.removeItem(SESSION_STORAGE_KEY);
+    }
   }
-
-  const body = new FormData();
-  body.append("question", question);
-  body.append(
-    "history",
-    JSON.stringify(history.map(({ role, content }) => ({ role, content }))),
-  );
-  files.forEach((item) => body.append("files", item.file));
-
-  const response = await fetch(endpoint, { method: "POST", body });
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload.error || "Backend RAG không phản hồi.");
-  }
-  return payload;
+  const created = await createSession();
+  window.localStorage.setItem(SESSION_STORAGE_KEY, created.session_id);
+  return { ...created, documents: [], messages: [] };
 }
 
 export default function Home() {
-  const [documents, setDocuments] = useState<DocumentItem[]>([]);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [documents, setDocuments] = useState<ApiDocument[]>([]);
   const [pendingIds, setPendingIds] = useState<string[]>([]);
   const [messages, setMessages] = useState<Message[]>(INITIAL_MESSAGES);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
+  const [isSessionLoading, setIsSessionLoading] = useState(true);
+  const [isUploading, setIsUploading] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const initializationRef = useRef<Promise<SessionSnapshot> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
+  const readyDocuments = useMemo(
+    () => documents.filter((item) => item.status === "ready"),
+    [documents],
+  );
   const pendingNames = useMemo(
     () =>
       documents
-        .filter((document) => pendingIds.includes(document.id))
-        .map((document) => document.file.name),
+        .filter((item) => pendingIds.includes(item.id))
+        .map((item) => item.file_name),
     [documents, pendingIds],
   );
 
   useEffect(() => {
+    let active = true;
+    initializationRef.current ??= restoreOrCreateSession();
+    initializationRef.current
+      .then((snapshot) => {
+        if (!active) return;
+        setSessionId(snapshot.session_id);
+        setDocuments(snapshot.documents);
+        setMessages(messagesFromSnapshot(snapshot));
+      })
+      .catch((requestError: unknown) => {
+        if (active)
+          setError(
+            requestError instanceof Error
+              ? requestError.message
+              : "Không khởi tạo được phiên làm việc.",
+          );
+      })
+      .finally(() => {
+        if (active) setIsSessionLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, isLoading]);
-
   useEffect(() => {
     if (!textareaRef.current) return;
     textareaRef.current.style.height = "0px";
     textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 140)}px`;
   }, [draft]);
 
-  function addFiles(fileList: FileList | null) {
+  async function addFiles(fileList: FileList | null) {
+    if (!sessionId || isUploading || isLoading || isSessionLoading) return;
     setError("");
     const incoming = Array.from(fileList || []);
-    const knownIds = new Set(documents.map((document) => document.id));
-    const accepted: DocumentItem[] = [];
+    const known = new Set(
+      documents.map((item) => `${item.file_name}-${item.size_bytes}`),
+    );
+    const accepted: File[] = [];
     const rejected: string[] = [];
-
+    const activeCount = documents.filter(
+      (item) => item.status !== "failed",
+    ).length;
     incoming.forEach((file) => {
-      const id = fileId(file);
-      if (knownIds.has(id)) return;
+      const signature = fileSignature(file);
+      if (known.has(signature)) {
+        rejected.push(`${file.name}: đã có trong phiên`);
+        return;
+      }
       if (!ALLOWED_EXTENSIONS.includes(extensionOf(file.name))) {
         rejected.push(`${file.name}: định dạng chưa hỗ trợ`);
         return;
@@ -262,79 +287,164 @@ export default function Home() {
         rejected.push(`${file.name}: lớn hơn 10 MB`);
         return;
       }
-      if (documents.length + accepted.length >= MAX_FILES) {
-        rejected.push(`Chỉ được tải tối đa ${MAX_FILES} file`);
+      if (activeCount + accepted.length >= MAX_FILES) {
+        rejected.push(`Chỉ được dùng tối đa ${MAX_FILES} file trong một phiên`);
         return;
       }
-      accepted.push({ id, file });
-      knownIds.add(id);
+      accepted.push(file);
+      known.add(signature);
     });
-
-    if (accepted.length) {
-      setDocuments((current) => [...current, ...accepted]);
-      setPendingIds((current) => [...current, ...accepted.map((item) => item.id)]);
+    if (!accepted.length) {
+      if (rejected.length) setError(rejected.join(" · "));
+      return;
     }
-    if (rejected.length) setError(rejected.join(" · "));
+    const oldIds = new Set(documents.map((item) => item.id));
+    setIsUploading(true);
+    try {
+      const result = await uploadSessionDocuments(sessionId, accepted);
+      setDocuments(result.documents);
+      setPendingIds((current) => [
+        ...current,
+        ...result.documents
+          .filter((item) => !oldIds.has(item.id) && item.status === "ready")
+          .map((item) => item.id),
+      ]);
+      const allErrors = [
+        ...rejected,
+        ...result.errors.map((item) => `${item.file_name}: ${item.message}`),
+      ];
+      if (allErrors.length) setError(allErrors.join(" · "));
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Không thể upload tài liệu.",
+      );
+    } finally {
+      setIsUploading(false);
+    }
   }
 
-  function removeFile(id: string) {
-    setDocuments((current) => current.filter((document) => document.id !== id));
-    setPendingIds((current) => current.filter((pendingId) => pendingId !== id));
-  }
-
-  function newChat() {
-    setMessages(INITIAL_MESSAGES);
-    setDraft("");
+  async function removeFile(documentId: string) {
+    if (!sessionId || isUploading || isLoading || isSessionLoading) return;
     setError("");
-    setSidebarOpen(false);
+    try {
+      await deleteSessionDocument(sessionId, documentId);
+      setDocuments((current) =>
+        current.filter((item) => item.id !== documentId),
+      );
+      setPendingIds((current) => current.filter((id) => id !== documentId));
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Không thể xóa tài liệu.",
+      );
+    }
+  }
+
+  async function clearAllFiles() {
+    if (!sessionId || isUploading || isLoading || isSessionLoading) return;
+    setError("");
+    try {
+      await clearSessionDocuments(sessionId);
+      setDocuments([]);
+      setPendingIds([]);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Không thể xóa tài liệu.",
+      );
+    }
+  }
+
+  async function newChat() {
+    if (isSessionLoading || isUploading || isLoading) return;
+    setIsSessionLoading(true);
+    setError("");
+    try {
+      if (sessionId) {
+        try {
+          await closeSession(sessionId);
+        } catch {
+          /* phiên có thể đã hết hạn */
+        }
+      }
+      const created = await createSession();
+      window.localStorage.setItem(SESSION_STORAGE_KEY, created.session_id);
+      setSessionId(created.session_id);
+      setDocuments([]);
+      setPendingIds([]);
+      setMessages(INITIAL_MESSAGES);
+      setDraft("");
+      setSidebarOpen(false);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Không tạo được phiên mới.",
+      );
+    } finally {
+      setIsSessionLoading(false);
+    }
   }
 
   async function sendMessage() {
     const question = draft.trim();
-    if (!question || isLoading) return;
-    if (!documents.length) {
-      setError("Bạn cần upload ít nhất một tài liệu trước khi đặt câu hỏi.");
+    if (!question || isLoading || isUploading || isSessionLoading) return;
+    if (!sessionId) {
+      setError("Phiên làm việc chưa sẵn sàng.");
+      return;
+    }
+    if (!readyDocuments.length) {
+      setError("Bạn cần ít nhất một tài liệu đã lập chỉ mục thành công.");
       inputRef.current?.click();
       return;
     }
-
-    const userMessage: Message = {
-      id: makeId(),
-      role: "user",
-      content: question,
-      attachments: pendingNames,
-    };
-    const currentHistory = [...messages, userMessage];
-    setMessages(currentHistory);
+    setMessages((current) => [
+      ...current,
+      {
+        id: makeId(),
+        role: "user",
+        content: question,
+        attachments: pendingNames,
+      },
+    ]);
     setDraft("");
     setError("");
     setPendingIds([]);
     setIsLoading(true);
-
     try {
-      const result = await requestRagAnswer({
-        question,
-        files: documents,
-        history: currentHistory.slice(-8),
-      });
+      const result = await askSessionQuestion(sessionId, question, 5);
+      const sources: MessageSource[] = result.sources.map((source) => ({
+        fileName: source.file_name,
+        locator: [
+          source.page_number === source.page_end_number
+            ? `Trang ${source.page_number}`
+            : `Trang ${source.page_number}-${source.page_end_number}`,
+          source.dieu,
+          `score=${source.score.toFixed(3)}`,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        excerpt: source.excerpt,
+      }));
       setMessages((current) => [
         ...current,
-        {
-          id: makeId(),
-          role: "assistant",
-          content: result.answer || "Backend chưa trả về nội dung answer.",
-          sources: Array.isArray(result.sources) ? result.sources : [],
-          demo: Boolean(result.demo),
-        },
+        { id: makeId(), role: "assistant", content: result.answer, sources },
       ]);
-    } catch (requestError: unknown) {
-      const messageText = requestError instanceof Error ? requestError.message : "Không thể nhận phản hồi";
+    } catch (requestError) {
+      const text =
+        requestError instanceof Error
+          ? requestError.message
+          : "Không thể nhận phản hồi";
       setMessages((current) => [
         ...current,
         {
           id: makeId(),
           role: "assistant",
-          content: `Không thể nhận phản hồi: ${messageText}`,
+          content: `Không thể nhận phản hồi: ${text}`,
           error: true,
         },
       ]);
@@ -347,9 +457,14 @@ export default function Home() {
   function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      sendMessage();
+      void sendMessage();
     }
   }
+  const statusText = isSessionLoading
+    ? "Đang tạo phiên"
+    : isUploading
+      ? "Đang indexing"
+      : "Grounded";
 
   return (
     <main className={styles.page}>
@@ -361,18 +476,23 @@ export default function Home() {
         }}
         onDragOver={(event) => event.preventDefault()}
         onDragLeave={(event) => {
-          const relatedTarget = event.relatedTarget;
-          if (!relatedTarget || !(relatedTarget instanceof Node) || !event.currentTarget.contains(relatedTarget)) {
+          const target = event.relatedTarget;
+          if (
+            !target ||
+            !(target instanceof Node) ||
+            !event.currentTarget.contains(target)
+          )
             setIsDragging(false);
-          }
         }}
         onDrop={(event) => {
           event.preventDefault();
           setIsDragging(false);
-          addFiles(event.dataTransfer.files);
+          void addFiles(event.dataTransfer.files);
         }}
       >
-        <aside className={`${styles.sidebar} ${sidebarOpen ? styles.sidebarOpen : ""}`}>
+        <aside
+          className={`${styles.sidebar} ${sidebarOpen ? styles.sidebarOpen : ""}`}
+        >
           <div className={styles.sidebarHeader}>
             <div className={styles.brandLine}>
               <span className={styles.logo}>SLAW</span>
@@ -385,56 +505,68 @@ export default function Home() {
                 <Icon name="close" />
               </button>
             </div>
-
             <div className={styles.primaryActions}>
-              <button className={styles.newChat} type="button" onClick={newChat}>
+              <button
+                className={styles.newChat}
+                type="button"
+                onClick={() => void newChat()}
+                disabled={isSessionLoading || isUploading || isLoading}
+              >
                 <Icon name="plus" size={17} strokeWidth={2.2} />
                 <span>New chat</span>
               </button>
-              <button className={styles.searchButton} type="button" aria-label="Tìm kiếm">
-                <Icon name="search" size={18} />
-              </button>
             </div>
           </div>
-
           <div className={styles.fileSection}>
             <div className={styles.sectionTitle}>
               <span>File</span>
               {documents.length > 0 && (
                 <button
                   type="button"
-                  onClick={() => {
-                    setDocuments([]);
-                    setPendingIds([]);
-                  }}
+                  onClick={() => void clearAllFiles()}
+                  disabled={isSessionLoading || isUploading || isLoading}
                 >
                   Clear All
                 </button>
               )}
             </div>
-
             <button
               className={styles.uploadButton}
               type="button"
               onClick={() => inputRef.current?.click()}
+              disabled={isUploading || isLoading || isSessionLoading}
             >
-              <span><Icon name="upload" size={19} /></span>
-              <strong>Thêm tài liệu</strong>
-              <small>PDF, DOCX, TXT…</small>
+              <span>
+                <Icon name="upload" size={19} />
+              </span>
+              <strong>
+                {isUploading ? "Đang xử lý tài liệu…" : "Thêm tài liệu"}
+              </strong>
+              <small>PDF, DOCX, TXT, MD, CSV, JSON</small>
             </button>
-
             <div className={styles.fileList}>
               {documents.map((document) => (
                 <div className={styles.fileItem} key={document.id}>
-                  <span className={styles.fileType}><Icon name="file" size={17} /></span>
+                  <span className={styles.fileType}>
+                    <Icon
+                      name={document.status === "failed" ? "alert" : "file"}
+                      size={17}
+                    />
+                  </span>
                   <span className={styles.fileInfo}>
-                    <strong title={document.file.name}>{document.file.name}</strong>
-                    <small>{formatFileSize(document.file.size)}</small>
+                    <strong title={document.file_name}>
+                      {document.file_name}
+                    </strong>
+                    <small title={document.error_message || undefined}>
+                      {formatFileSize(document.size_bytes)} ·{" "}
+                      {documentStatus(document)}
+                    </small>
                   </span>
                   <button
                     type="button"
-                    aria-label={`Xóa ${document.file.name}`}
-                    onClick={() => removeFile(document.id)}
+                    aria-label={`Xóa ${document.file_name}`}
+                    onClick={() => void removeFile(document.id)}
+                    disabled={isSessionLoading || isUploading || isLoading}
                   >
                     <Icon name="trash" size={15} />
                   </button>
@@ -445,16 +577,18 @@ export default function Home() {
               )}
             </div>
           </div>
-
           <div className={styles.profile}>
-            <span className={styles.profileIcon}><Icon name="user" size={19} /></span>
+            <span className={styles.profileIcon}>
+              <Icon name="user" size={19} />
+            </span>
             <span>
-              <strong>Username</strong>
-              <small>Gói cá nhân</small>
+              <strong>Phiên cục bộ</strong>
+              <small>
+                {sessionId ? `Phiên ${sessionId.slice(0, 8)}` : "Đang kết nối"}
+              </small>
             </span>
           </div>
         </aside>
-
         {sidebarOpen && (
           <button
             className={styles.backdrop}
@@ -463,7 +597,6 @@ export default function Home() {
             onClick={() => setSidebarOpen(false)}
           />
         )}
-
         <section className={styles.chatArea}>
           <header className={styles.chatHeader}>
             <button
@@ -478,16 +611,15 @@ export default function Home() {
               <h1>Hỏi đáp tài liệu cá nhân</h1>
               <p>
                 {documents.length
-                  ? `${documents.length} tài liệu đang được sử dụng`
+                  ? `${readyDocuments.length}/${documents.length} tài liệu sẵn sàng`
                   : "Tải tài liệu để bắt đầu"}
               </p>
             </div>
             <span className={styles.statusBadge}>
               <Icon name="check" size={15} />
-              Grounded
+              {statusText}
             </span>
           </header>
-
           <div className={styles.messageScroller}>
             <div className={styles.messageList}>
               {messages.map((message) => {
@@ -504,20 +636,22 @@ export default function Home() {
                         <Icon name="bot" size={18} />
                       </span>
                     )}
-
                     <div
                       className={`${styles.bubble} ${isUser ? styles.userBubble : styles.assistantBubble}`}
                     >
                       {attachments.length > 0 && (
                         <div className={styles.attachmentsInMessage}>
                           {attachments.map((name) => (
-                            <span key={name}><Icon name="file" size={14} />{name}</span>
+                            <span key={name}>
+                              <Icon name="file" size={14} />
+                              {name}
+                            </span>
                           ))}
                         </div>
                       )}
-
-                      <p className={message.error ? styles.errorAnswer : ""}>{message.content}</p>
-
+                      <p className={message.error ? styles.errorAnswer : ""}>
+                        {message.content}
+                      </p>
                       {!isUser && sources.length > 0 && (
                         <div className={styles.sources}>
                           <div className={styles.sourcesHeading}>
@@ -526,7 +660,10 @@ export default function Home() {
                           </div>
                           <div className={styles.sourceList}>
                             {sources.map((source, index) => (
-                              <details className={styles.sourceCard} key={`${source.fileName}-${index}`}>
+                              <details
+                                className={styles.sourceCard}
+                                key={`${source.fileName}-${index}`}
+                              >
                                 <summary>
                                   <span>{index + 1}</span>
                                   <strong>{source.fileName}</strong>
@@ -536,15 +673,9 @@ export default function Home() {
                               </details>
                             ))}
                           </div>
-                          {message.demo && (
-                            <div className={styles.demoNote}>
-                              Đây là dữ liệu mẫu. Điền NEXT_PUBLIC_RAG_API_URL để nối backend.
-                            </div>
-                          )}
                         </div>
                       )}
                     </div>
-
                     {isUser && (
                       <span className={`${styles.avatar} ${styles.userAvatar}`}>
                         <Icon name="user" size={18} />
@@ -553,7 +684,6 @@ export default function Home() {
                   </article>
                 );
               })}
-
               {messages.length === 1 && (
                 <div className={styles.suggestions}>
                   <span>Gợi ý câu hỏi</span>
@@ -574,15 +704,18 @@ export default function Home() {
                   </div>
                 </div>
               )}
-
               {isLoading && (
-                <article className={`${styles.messageRow} ${styles.assistantRow}`}>
+                <article
+                  className={`${styles.messageRow} ${styles.assistantRow}`}
+                >
                   <span className={`${styles.avatar} ${styles.botAvatar}`}>
                     <Icon name="bot" size={18} />
                   </span>
                   <div className={`${styles.bubble} ${styles.assistantBubble}`}>
                     <div className={styles.typing} aria-label="Đang trả lời">
-                      <span /><span /><span />
+                      <span />
+                      <span />
+                      <span />
                     </div>
                   </div>
                 </article>
@@ -590,13 +723,15 @@ export default function Home() {
               <div ref={bottomRef} />
             </div>
           </div>
-
           <div className={styles.composerDock}>
             <div className={styles.composerInner}>
               {pendingNames.length > 0 && (
                 <div className={styles.pendingFiles}>
                   {pendingNames.map((name) => (
-                    <span key={name}><Icon name="file" size={14} />{name}</span>
+                    <span key={name}>
+                      <Icon name="file" size={14} />
+                      {name}
+                    </span>
                   ))}
                 </div>
               )}
@@ -612,6 +747,7 @@ export default function Home() {
                   className={styles.attachButton}
                   aria-label="Đính kèm tài liệu"
                   onClick={() => inputRef.current?.click()}
+                  disabled={isUploading || isLoading || isSessionLoading}
                 >
                   <Icon name="clip" size={20} />
                 </button>
@@ -619,25 +755,38 @@ export default function Home() {
                   ref={textareaRef}
                   value={draft}
                   rows={1}
-                  placeholder={documents.length ? "Hỏi bất cứ điều gì về tài liệu…" : "Upload file trước khi chat"}
+                  placeholder={
+                    readyDocuments.length
+                      ? "Hỏi bất cứ điều gì về tài liệu…"
+                      : isUploading
+                        ? "Đang lập chỉ mục tài liệu…"
+                        : "Upload file trước khi chat"
+                  }
                   onChange={(event) => setDraft(event.target.value)}
                   onKeyDown={onComposerKeyDown}
+                  disabled={isSessionLoading}
                 />
                 <button
                   type="button"
                   className={styles.sendButton}
                   aria-label="Gửi câu hỏi"
-                  disabled={!draft.trim() || isLoading}
-                  onClick={sendMessage}
+                  disabled={
+                    !draft.trim() ||
+                    isLoading ||
+                    isUploading ||
+                    isSessionLoading
+                  }
+                  onClick={() => void sendMessage()}
                 >
                   <Icon name="send" size={19} />
                 </button>
               </div>
-              <p className={styles.composerHint}>Enter để gửi · Shift + Enter để xuống dòng</p>
+              <p className={styles.composerHint}>
+                Enter để gửi · Shift + Enter để xuống dòng
+              </p>
             </div>
           </div>
         </section>
-
         {isDragging && (
           <div className={styles.dropOverlay}>
             <Icon name="upload" size={40} />
@@ -645,7 +794,6 @@ export default function Home() {
             <span>PDF, DOCX, TXT, MD, CSV, JSON</span>
           </div>
         )}
-
         <input
           ref={inputRef}
           className={styles.hiddenInput}
@@ -653,7 +801,7 @@ export default function Home() {
           multiple
           accept=".pdf,.docx,.txt,.md,.csv,.json"
           onChange={(event) => {
-            addFiles(event.target.files);
+            void addFiles(event.target.files);
             event.target.value = "";
           }}
         />

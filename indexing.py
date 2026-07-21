@@ -1,4 +1,6 @@
-#CODE CHECK GIAI ĐOẠN 1+2
+# BẢN THAM KHẢO GIAI ĐOẠN 1+2.
+# Pipeline đang được ứng dụng sử dụng nằm trong backend/app/services/.
+# Giữ file này để đối chiếu thuật toán cũ; không import vào FastAPI.
 """Indexing tài liệu pháp luật theo Chương/Mục/Điều.
 
 Điểm quan trọng của pipeline này:
