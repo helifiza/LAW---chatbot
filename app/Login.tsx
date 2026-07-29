@@ -6,26 +6,27 @@ import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 
 async function requestLogin({ email, password }: { email: string; password: string }) {
-  const endpoint = process.env.NEXT_PUBLIC_AUTH_API_URL;
-
-  if (!endpoint) {
-    // Chế độ demo: chưa nối backend thì chỉ cần có email + password là coi như thành công
-    await new Promise((resolve) => window.setTimeout(resolve, 650));
-    if (!email || !password) {
-      throw new Error("Vui lòng nhập đầy đủ email và mật khẩu.");
-    }
-    return { success: true, demo: true };
-  }
-
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
-  });
+  const response = await fetch(`${process.env.NEXT_PUBLIC_AUTH_API_BASE_URL}/login`,
+    {
+      method: "POST",
+      headers:{
+        "Content-Type": "application/json",
+      },
+      credentials: "include",
+      body: JSON.stringify({
+        email,
+        password,
+      }),
+    },
+  );
   const payload = await response.json();
   if (!response.ok) {
-    throw new Error(payload.error || "Đăng nhập thất bại.");
-  }
+    throw new Error(
+      payload?.detail ||
+      payload?.error?.message ||
+      payload?.message ||
+      "Đăng nhập sai tài khoản hoặc mật khẩu. Vui lòng thử lại.",
+    );}
   return payload;
 }
 

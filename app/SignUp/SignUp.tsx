@@ -53,10 +53,46 @@ export default function SignupPage() {
     [fullName, email, password, confirmPassword, acceptedTerms],
   );
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!isValid) return;
-    setMessage("Form đăng ký đã sẵn sàng để kết nối với API của SLaw.");
+    setMessage("");
+
+    try {
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_AUTH_API_BASE_URL}/register`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            full_name: fullName.trim(),
+            email: email.trim(),
+            password: password,
+            confirm_password: confirmPassword,
+          }),
+        },
+      );
+      const payload = await response.json();
+      if(!response.ok) {
+        throw new Error(
+          payload?.detail ||
+            payload?.error?.message ||
+            payload?.message ||`Đăng ký thất bại (${response.status}).`,
+        );
+      }
+      setMessage("Đăng ký thành công. Vui lòng kiểm tra email để xác nhận tài khoản.");
+      window.setTimeout(() => {
+        window.location.href = "/";
+      }, 800);
+    }catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Đăng ký thất bại. Vui lòng thử lại.",
+      );
+    }
   }
 
   return (

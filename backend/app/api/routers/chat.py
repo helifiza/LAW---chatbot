@@ -18,5 +18,10 @@ def ask_question(
         request.top_k or container.settings.default_top_k,
         container.settings.max_top_k,
     )
-    answer = container.rag_service.ask(session_id, request.question, top_k)
+    answer = container.rag_service.ask(
+        session_id,
+        request.question,
+        top_k,
+        include_trace=request.debug,
+    )
     return QuestionResponse.from_answer(answer)

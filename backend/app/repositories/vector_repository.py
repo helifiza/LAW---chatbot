@@ -17,23 +17,29 @@ class VectorRepository:
         persist_directory: Path,
         collection_name: str,
         embedding_model: str,
-        embedding_provider: str = "ollama",
+        embedding_provider: str = "gemini",
+        embedding_dimension: int | None = None,
     ) -> None:
         self.embedding_model = embedding_model
         self.embedding_provider = embedding_provider
+        self.embedding_dimension = embedding_dimension
         self._lock = threading.RLock()
         self._client = chromadb.PersistentClient(path=str(persist_directory))
+        metadata: dict[str, object] = {
+            "hnsw:space": "cosine",
+            "embedding_model": embedding_model,
+            "embedding_provider": embedding_provider,
+        }
+        if embedding_dimension is not None:
+            metadata["embedding_dimension"] = embedding_dimension
         self._collection = self._client.get_or_create_collection(
             name=collection_name,
-            metadata={
-                "hnsw:space": "cosine",
-                "embedding_model": embedding_model,
-                "embedding_provider": embedding_provider,
-            },
+            metadata=metadata,
         )
         collection_metadata = self._collection.metadata or {}
         stored_model = collection_metadata.get("embedding_model")
         stored_provider = collection_metadata.get("embedding_provider")
+        stored_dimension = collection_metadata.get("embedding_dimension")
         if stored_model and stored_model != embedding_model:
             raise ValueError(
                 "Collection đang dùng embedding model "
@@ -44,6 +50,16 @@ class VectorRepository:
             raise ValueError(
                 "Collection đang dùng embedding provider "
                 f"{stored_provider}, không thể dùng {embedding_provider}. "
+                "Hãy đổi CHROMA_COLLECTION_NAME hoặc embedding lại dữ liệu."
+            )
+        if (
+            stored_dimension
+            and embedding_dimension is not None
+            and int(stored_dimension) != embedding_dimension
+        ):
+            raise ValueError(
+                "Collection đang dùng embedding "
+                f"{stored_dimension} chiều, không thể dùng {embedding_dimension} chiều. "
                 "Hãy đổi CHROMA_COLLECTION_NAME hoặc embedding lại dữ liệu."
             )
 
@@ -127,7 +143,7 @@ class VectorRepository:
                 return []
             result = self._collection.query(
                 query_embeddings=[list(query_embedding)],
-                n_results=min(max(top_k * 2, top_k), matching_count),
+                n_results=min(max(1, top_k), matching_count),
                 where=where,
                 include=["documents", "metadatas", "distances"],
             )
@@ -148,6 +164,22 @@ class VectorRepository:
                 )
             )
         return search_results
+
+    def list_chunks(self, session_id: str) -> list[ChunkDetail]:
+        with self._lock:
+            result = self._collection.get(
+                where={"session_id": session_id},
+                include=["documents", "metadatas"],
+            )
+        ids = result.get("ids") or []
+        documents = result.get("documents") or []
+        metadatas = result.get("metadatas") or []
+        chunks: list[ChunkDetail] = []
+        for element_id, text, metadata in zip(ids, documents, metadatas):
+            if text is None or metadata is None:
+                continue
+            chunks.append(self._chunk_from_result(element_id, text, metadata))
+        return chunks
 
     def delete_document(self, session_id: str, document_id: str) -> None:
         with self._lock:

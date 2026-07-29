@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from app.clients.ollama_client import OllamaClient
+from app.clients.gemini_client import GeminiClient
 
 
 SYSTEM_PROMPT = """Bạn là trợ lý hỏi đáp tài liệu của SLaw.
@@ -16,7 +16,7 @@ Trả lời bằng tiếng Việt, rõ ràng và đúng trọng tâm."""
 class GenerationService:
     def __init__(
         self,
-        client: OllamaClient,
+        client: GeminiClient,
         model: str,
         temperature: float,
         max_tokens: int,
@@ -40,12 +40,10 @@ class GenerationService:
             f"NGỮ CẢNH:\n{context}\n\n"
             f"CÂU HỎI HIỆN TẠI: {question}"
         )
-        return self.client.chat(
+        return self.client.generate(
             model=self.model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
+            prompt=user_prompt,
+            system_instruction=SYSTEM_PROMPT,
             temperature=self.temperature,
-            max_tokens=self.max_tokens,
+            max_output_tokens=self.max_tokens,
         )

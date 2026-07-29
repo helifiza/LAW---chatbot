@@ -2,11 +2,28 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, model_validator, EmailStr,field_validator
 
 from app.domain.models import DocumentRecord, MessageRecord, SessionRecord
 from app.services.rag_service import RagAnswer, RagSource
 
+class RegisterRequest(BaseModel):
+    full_name: str = Field(min_length=2, max_length=100)
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    confirm_password: str = Field(min_length=8, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_passwords(self):
+        if self.password != self.confirm_password:
+            raise ValueError("Mật khẩu xác nhận không khớp.")
+
+        return self
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=128)
 
 class DocumentOut(BaseModel):
     id: str
@@ -95,15 +112,35 @@ class UploadResponse(BaseModel):
 
 
 class QuestionRequest(BaseModel):
-    question: str = Field(..., min_length=1, max_length=4000)
-    top_k: int | None = Field(default=None, ge=1, le=20)
+    question: str = Field(
+        ...,
+        min_length=1,
+        max_length=4000,
+    )
+
+    top_k: int | None = Field(
+        default=None,
+        ge=1,
+        le=20,
+    )
+    debug: bool = Field(
+        default=False,
+        description="Trả thêm trace truy hồi; không bao gồm suy luận nội bộ.",
+    )
 
     @field_validator("question")
     @classmethod
-    def question_must_not_be_blank(cls, value: str) -> str:
+    def question_must_not_be_blank(
+        cls,
+        value: str,
+    ) -> str:
         cleaned = value.strip()
+
         if not cleaned:
-            raise ValueError("Câu hỏi không được để trống")
+            raise ValueError(
+                "Câu hỏi không được để trống"
+            )
+
         return cleaned
 
 
@@ -126,6 +163,7 @@ class QuestionResponse(BaseModel):
     answer: str
     sources: list[SourceOut]
     retrieved_count: int
+    trace: dict[str, object] | None = None
 
     @classmethod
     def from_answer(cls, answer: RagAnswer) -> "QuestionResponse":
@@ -134,6 +172,7 @@ class QuestionResponse(BaseModel):
             answer=answer.answer,
             sources=[SourceOut.from_source(item) for item in answer.sources],
             retrieved_count=answer.retrieved_count,
+            trace=answer.trace,
         )
 
 
@@ -142,9 +181,11 @@ class HealthResponse(BaseModel):
     version: str
     embedding_provider: str
     embedding_model: str
-    ollama_available: bool
-    embedding_model_available: bool
+    embedding_dimension: int
     generation_provider: str
     generation_model: str
-    generation_model_available: bool
+    gemini_configured: bool
+    hyde_enabled: bool
+    reranker_model: str
+    reranker_loaded: bool
     vector_count: int

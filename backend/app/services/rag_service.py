@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Sequence
 
 from app.core.errors import NoReadyDocumentError
 from app.domain.models import DocumentStatus, MessageRole, SearchResult
 from app.repositories.session_repository import SessionRepository
-from app.repositories.vector_repository import VectorRepository
-from app.services.embedding_service import EmbeddingService
 from app.services.generation_service import GenerationService
+from app.services.hybrid_retrieval_service import HybridRetrievalService
+from app.services.query_rewrite_service import QueryRewriteService
 from app.services.session_service import SessionService
 
 
@@ -35,6 +36,7 @@ class RagAnswer:
     answer: str
     sources: tuple[RagSource, ...]
     retrieved_count: int
+    trace: dict[str, object] | None = None
 
 
 class RagService:
@@ -42,18 +44,16 @@ class RagService:
         self,
         session_service: SessionService,
         session_repository: SessionRepository,
-        vector_repository: VectorRepository,
-        embedding_service: EmbeddingService,
+        query_rewrite_service: QueryRewriteService,
+        retrieval_service: HybridRetrievalService,
         generation_service: GenerationService,
-        min_similarity: float,
         history_limit: int,
     ) -> None:
         self.session_service = session_service
         self.session_repository = session_repository
-        self.vector_repository = vector_repository
-        self.embedding_service = embedding_service
+        self.query_rewrite_service = query_rewrite_service
+        self.retrieval_service = retrieval_service
         self.generation_service = generation_service
-        self.min_similarity = min_similarity
         self.history_limit = history_limit
 
     @staticmethod
@@ -68,8 +68,6 @@ class RagService:
     ) -> list[SearchResult]:
         kept: list[SearchResult] = []
         for result in sorted(results, key=lambda item: item.score, reverse=True):
-            if result.score < self.min_similarity:
-                continue
             if any(
                 self._jaccard(result.chunk.text, item.chunk.text) >= 0.90
                 for item in kept
@@ -96,7 +94,14 @@ class RagService:
             sections.append(f"{heading}]\n{chunk.text}")
         return "\n\n---\n\n".join(sections)
 
-    def ask(self, session_id: str, question: str, top_k: int) -> RagAnswer:
+    def ask(
+        self,
+        session_id: str,
+        question: str,
+        top_k: int,
+        include_trace: bool = False,
+    ) -> RagAnswer:
+        request_started = time.perf_counter()
         self.session_service.require_active(session_id)
         ready_count = self.session_repository.count_documents(
             session_id, statuses=(DocumentStatus.READY.value,)
@@ -108,16 +113,29 @@ class RagService:
         history_records = self.session_repository.list_messages(
             session_id, limit=self.history_limit
         )
-        query_embedding = self.embedding_service.embed_query(question)
-        raw_results = self.vector_repository.query(
-            session_id, query_embedding, top_k
+        history = [
+            (message.role, message.content) for message in history_records
+        ]
+
+        rewrite_started = time.perf_counter()
+        rewrite = self.query_rewrite_service.rewrite(question, history)
+        rewrite_ms = (time.perf_counter() - rewrite_started) * 1000
+
+        retrieval = self.retrieval_service.retrieve(
+            session_id=session_id,
+            original_query=question,
+            dense_query=rewrite.retrieval_query,
+            top_k=max(top_k * 2, top_k),
         )
-        results = self._deduplicate(raw_results, top_k)
+        results = self._deduplicate(retrieval.results, top_k)
+
+        generation_ms = 0.0
         if results:
-            history = [(message.role, message.content) for message in history_records]
+            generation_started = time.perf_counter()
             answer = self.generation_service.generate(
                 question, self._format_context(results), history
             )
+            generation_ms = (time.perf_counter() - generation_started) * 1000
         else:
             answer = NOT_FOUND_ANSWER
         self.session_repository.add_message(session_id, MessageRole.USER, question)
@@ -137,4 +155,28 @@ class RagService:
             )
             for result in results
         )
-        return RagAnswer(question, answer, sources, len(results))
+
+        trace: dict[str, object] | None = None
+        if include_trace:
+            trace = dict(retrieval.trace)
+            warnings = list(trace.get("warnings") or [])
+            if rewrite.warning:
+                warnings.insert(0, rewrite.warning)
+            trace["warnings"] = warnings
+            trace["rewrite"] = {
+                "strategy": "hyde" if rewrite.used_hyde else "original_query",
+                "used_hyde": rewrite.used_hyde,
+                "model": self.query_rewrite_service.model,
+                "time_ms": round(rewrite_ms, 3),
+            }
+            trace["generation"] = {
+                "model": self.generation_service.model,
+                "context_element_ids": [
+                    result.chunk.element_id for result in results
+                ],
+                "time_ms": round(generation_ms, 3),
+            }
+            trace["total_time_ms"] = round(
+                (time.perf_counter() - request_started) * 1000, 3
+            )
+        return RagAnswer(question, answer, sources, len(results), trace)

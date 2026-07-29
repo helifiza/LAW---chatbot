@@ -2,19 +2,21 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from app.clients.ollama_client import OllamaClient
+from app.clients.gemini_client import GeminiClient
 
 
 class EmbeddingService:
     def __init__(
         self,
-        client: OllamaClient,
+        client: GeminiClient,
         model: str,
         batch_size: int,
+        output_dimension: int,
     ) -> None:
         self.client = client
         self.model = model
         self.batch_size = max(1, batch_size)
+        self.output_dimension = output_dimension
 
     def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
         if not texts:
@@ -25,11 +27,18 @@ class EmbeddingService:
                 self.client.embed(
                     self.model,
                     texts[start : start + self.batch_size],
+                    task_type="RETRIEVAL_DOCUMENT",
+                    output_dimension=self.output_dimension,
                 )
             )
         if len(embeddings) != len(texts):
-            raise RuntimeError("Ollama trả về thiếu embedding")
+            raise RuntimeError("Gemini trả về thiếu embedding")
         return embeddings
 
     def embed_query(self, question: str) -> list[float]:
-        return self.client.embed(self.model, [question])[0]
+        return self.client.embed(
+            self.model,
+            [question],
+            task_type="RETRIEVAL_QUERY",
+            output_dimension=self.output_dimension,
+        )[0]

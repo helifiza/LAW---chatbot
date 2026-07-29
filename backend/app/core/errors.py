@@ -63,6 +63,11 @@ class NoReadyDocumentError(AppError):
     code = "NO_READY_DOCUMENT"
 
 
-class OllamaServiceError(AppError):
+class GeminiServiceError(AppError):
     status_code = 502
-    code = "OLLAMA_REQUEST_FAILED"
+    code = "GEMINI_REQUEST_FAILED"
+
+
+class RerankerServiceError(AppError):
+    status_code = 502
+    code = "RERANKER_FAILED"

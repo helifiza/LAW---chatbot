@@ -9,12 +9,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routers import chat, documents, health, sessions
+from app.api.routers import auth, chat, documents, health, sessions
 from app.container import AppContainer, build_container
 from app.core.config import Settings
 from app.core.errors import AppError
 from app.core.logging import configure_logging
-
 
 settings = Settings.from_env()
 configure_logging(settings.log_level)
@@ -47,7 +46,7 @@ async def lifespan(app: FastAPI):
         cleanup_task.cancel()
         with suppress(asyncio.CancelledError):
             await cleanup_task
-        container.ollama_client.close()
+        container.gemini_client.close()
         logger.info("SLaw API dừng")
 
 
@@ -58,10 +57,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.include_router(
+    auth.router,
+    prefix=settings.api_prefix,
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(settings.cors_origins),
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
