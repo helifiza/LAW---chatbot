@@ -6,7 +6,7 @@ from pathlib import Path
 from app.core.errors import DocumentParseError, UnsupportedFileTypeError
 
 
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".csv", ".json"}
+SUPPORTED_EXTENSIONS = {".pdf"}
 
 
 class DocumentParser:

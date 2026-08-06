@@ -799,7 +799,7 @@ export default function Home() {
           className={styles.hiddenInput}
           type="file"
           multiple
-          accept=".pdf,.docx,.txt,.md,.csv,.json"
+          accept=".pdf"
           onChange={(event) => {
             void addFiles(event.target.files);
             event.target.value = "";

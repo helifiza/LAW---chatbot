@@ -118,3 +118,4 @@ def root() -> dict[str, str]:
         "docs": "/docs",
         "health": f"{settings.api_prefix}/health",
     }
+    
