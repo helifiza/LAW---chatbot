@@ -59,9 +59,6 @@ class Settings:
     chroma_collection_name: str
     upload_temp_dir: Path
 
-    session_ttl_minutes: int
-    session_cleanup_interval_seconds: int
-    max_session_documents: int
     max_file_size_bytes: int
     chunk_size_chars: int
     chunk_overlap_chars: int
@@ -149,11 +146,6 @@ class Settings:
                 "slaw_documents_gemini_embedding_001_768_v1",
             ),
             upload_temp_dir=_resolve_path(os.getenv("UPLOAD_TEMP_DIR"), "data/tmp"),
-            session_ttl_minutes=int(os.getenv("SESSION_TTL_MINUTES", "1440")),
-            session_cleanup_interval_seconds=max(
-                30, int(os.getenv("SESSION_CLEANUP_INTERVAL_SECONDS", "300"))
-            ),
-            max_session_documents=int(os.getenv("MAX_SESSION_DOCUMENTS", "5")),
             max_file_size_bytes=int(os.getenv("MAX_FILE_SIZE_MB", "10"))
             * 1024
             * 1024,

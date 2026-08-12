@@ -6,7 +6,7 @@ from app.services.chunking_service import LegalChunkingService
 class LegalChunkingServiceTests(unittest.TestCase):
     def test_preserves_article_and_page_metadata(self) -> None:
         chunks = LegalChunkingService(500, 50).chunk_pages(
-            "session",
+            "history",
             "document",
             "luat.txt",
             [
@@ -23,7 +23,7 @@ class LegalChunkingServiceTests(unittest.TestCase):
     def test_splits_long_article_with_overlap(self) -> None:
         text = "Điều 1. Nội dung\n" + " ".join(f"từ{i}" for i in range(300))
         chunks = LegalChunkingService(220, 40).chunk_pages(
-            "s", "d", "test.txt", [(1, text)], False
+            "h", "d", "test.txt", [(1, text)], False
         )
         self.assertGreater(len(chunks), 1)
         self.assertTrue(all(len(item.text) <= 220 for item in chunks))

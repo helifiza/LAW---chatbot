@@ -8,12 +8,13 @@ from enum import StrEnum
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
-
-class SessionStatus(StrEnum):
+"""
+#bỏ đi
+class HistoryStatus(StrEnum):
     ACTIVE = "active"
     CLOSED = "closed"
 
-
+"""
 class DocumentStatus(StrEnum):
     PROCESSING = "processing"
     READY = "ready"
@@ -26,18 +27,18 @@ class MessageRole(StrEnum):
 
 
 @dataclass(frozen=True)
-class SessionRecord:
+class HistoryRecord:
     id: str
-    status: str
+    user_id: str
+    title: str
     created_at: datetime
     updated_at: datetime
-    expires_at: datetime
 
 
 @dataclass(frozen=True)
 class DocumentRecord:
     id: str
-    session_id: str
+    history_id: str
     file_name: str
     mime_type: str
     size_bytes: int
@@ -50,7 +51,7 @@ class DocumentRecord:
 @dataclass(frozen=True)
 class MessageRecord:
     id: int
-    session_id: str
+    history_id: str
     role: str
     content: str
     created_at: datetime
@@ -58,8 +59,9 @@ class MessageRecord:
 
 @dataclass(frozen=True)
 class ChunkDetail:
-    session_id: str
+    history_id: str
     document_id: str
+    user_id: str
     element_id: str
     file_name: str
     page_number: int

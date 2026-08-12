@@ -3,16 +3,16 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
 
-from app.api.dependencies import get_container
+from app.api.dependencies import get_container, get_current_user
 from app.api.schemas import DocumentOut, UploadErrorOut, UploadResponse
 from app.container import AppContainer
 from app.core.errors import AppError, FileTooLargeError, UnsupportedFileTypeError
 from app.services.document_parser import SUPPORTED_EXTENSIONS
 
 
-router = APIRouter(prefix="/sessions/{session_id}/documents", tags=["documents"])
+router = APIRouter(prefix="/histories/{history_id}/documents", tags=["documents"])
 
 
 def _safe_file_name(value: str | None) -> str:
@@ -61,11 +61,17 @@ def _save_temporary_upload(
 
 @router.post("", response_model=UploadResponse)
 def upload_documents(
-    session_id: str,
+    history_id: str,
     files: list[UploadFile] = File(...),
+    user_id: str = Depends(get_current_user),
     container: AppContainer = Depends(get_container),
 ) -> UploadResponse:
-    container.session_service.require_active(session_id)
+    history = container.history_service.require_active(history_id)
+    if history.user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy cuộc trò chuyện.",
+        )
     errors: list[UploadErrorOut] = []
     for upload in files:
         temporary_path: Path | None = None
@@ -75,7 +81,8 @@ def upload_documents(
                 upload, container
             )
             container.indexing_service.index_file(
-                session_id,
+                history_id,
+                user_id,
                 temporary_path,
                 file_name,
                 upload.content_type or "application/octet-stream",
@@ -87,7 +94,7 @@ def upload_documents(
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
             upload.file.close()
-    documents = container.session_repository.list_documents(session_id)
+    documents = container.history_service.list_documents(history_id)
     return UploadResponse(
         documents=[DocumentOut.from_record(item) for item in documents],
         errors=errors,
@@ -96,17 +103,32 @@ def upload_documents(
 
 @router.delete("", status_code=status.HTTP_204_NO_CONTENT)
 def clear_documents(
-    session_id: str, container: AppContainer = Depends(get_container)
+    history_id: str,
+    user_id: str = Depends(get_current_user),
+    container: AppContainer = Depends(get_container),
 ) -> Response:
-    container.session_service.clear_documents(session_id)
+    history = container.history_service.require_active(history_id)
+    if history.user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy cuộc trò chuyện.",
+        )
+    container.history_service.clear_documents(history_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_document(
-    session_id: str,
+    history_id: str,
     document_id: str,
+    user_id: str = Depends(get_current_user),
     container: AppContainer = Depends(get_container),
 ) -> Response:
-    container.session_service.delete_document(session_id, document_id)
+    history = container.history_service.require_active(history_id)
+    if history.user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy cuộc trò chuyện.",
+        )
+    container.history_service.delete_document(history_id, document_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -112,7 +112,7 @@ class HybridRetrievalService:
 
     def retrieve(
         self,
-        session_id: str,
+        history_id: str,
         original_query: str,
         dense_query: str,
         top_k: int,
@@ -125,14 +125,14 @@ class HybridRetrievalService:
         dense_results = [
             result
             for result in self.vector_repository.query(
-                session_id, query_embedding, self.candidate_k
+                history_id, query_embedding, self.candidate_k
             )
             if result.score >= self.min_dense_similarity
         ]
         dense_ms = (time.perf_counter() - dense_started) * 1000
 
         bm25_started = time.perf_counter()
-        chunks = self.vector_repository.list_chunks(session_id)
+        chunks = self.vector_repository.list_chunks(history_id)
         # Giữ câu hỏi gốc cho BM25 để không làm loãng từ khóa pháp lý chính xác.
         bm25_results = self._bm25(chunks, original_query)
         bm25_ms = (time.perf_counter() - bm25_started) * 1000
@@ -220,7 +220,7 @@ class HybridRetrievalService:
         }
         self.logger.info(
             "Hybrid retrieval | session=%s dense=%s bm25=%s fused=%s final=%s",
-            session_id,
+            history_id,
             len(dense_results),
             len(bm25_results),
             len(fused),

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from contextlib import asynccontextmanager, suppress
 
@@ -9,7 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routers import auth, chat, documents, health, sessions
+from app.api.routers import auth, chat, documents, health, histories
 from app.container import AppContainer, build_container
 from app.core.config import Settings
 from app.core.errors import AppError
@@ -20,32 +19,14 @@ configure_logging(settings.log_level)
 logger = logging.getLogger("slaw.api")
 
 
-async def cleanup_expired_sessions(container: AppContainer) -> None:
-    while True:
-        await asyncio.sleep(settings.session_cleanup_interval_seconds)
-        try:
-            await asyncio.to_thread(container.session_service.cleanup_expired)
-        except Exception:
-            logger.exception("Không dọn được phiên hết hạn")
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     container = build_container(settings)
     app.state.container = container
-    removed = container.session_service.cleanup_expired()
-    logger.info(
-        "SLaw API khởi động | version=%s expired_sessions_removed=%s",
-        settings.app_version,
-        removed,
-    )
-    cleanup_task = asyncio.create_task(cleanup_expired_sessions(container))
     try:
         yield
     finally:
-        cleanup_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await cleanup_task
         container.gemini_client.close()
         logger.info("SLaw API dừng")
 
@@ -106,7 +87,7 @@ async def unexpected_error_handler(_: Request, exc: Exception) -> JSONResponse:
 
 
 app.include_router(health.router, prefix=settings.api_prefix)
-app.include_router(sessions.router, prefix=settings.api_prefix)
+app.include_router(histories.router, prefix=settings.api_prefix)
 app.include_router(documents.router, prefix=settings.api_prefix)
 app.include_router(chat.router, prefix=settings.api_prefix)
 

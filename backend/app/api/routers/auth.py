@@ -1,12 +1,12 @@
 from fastapi import APIRouter, HTTPException, Request, Response
 
-from app.api.schemas import LoginRequest, RegisterRequest
+from app.api.schemas import AuthResponse, LoginRequest, RegisterRequest, UserOut
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post("/register")
+@router.post("/register", response_model=AuthResponse)
 def register(
     body: RegisterRequest,
     request: Request,
@@ -27,11 +27,11 @@ def register(
 
     return {
         "message": "Đăng ký thành công.",
-        "user": user,
+        "user": UserOut.from_dict(user),
     }
 
 
-@router.post("/login")
+@router.post("/login", response_model=AuthResponse)
 def login(
     body: LoginRequest,
     response: Response,
@@ -57,11 +57,12 @@ def login(
         samesite="lax",
         secure=False,
         max_age=24 * 60 * 60,
+        path="/",
     )
 
     return {
         "message": "Đăng nhập thành công.",
-        "user": user,
+        "user": UserOut.from_dict(user),
     }
 
 

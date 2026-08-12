@@ -15,18 +15,18 @@ class NotFoundError(AppError):
     code = "NOT_FOUND"
 
 
-class SessionNotFoundError(NotFoundError):
-    code = "SESSION_NOT_FOUND"
+class HistoryNotFoundError(NotFoundError):
+    code = "HISTORY_NOT_FOUND"
 
 
-class SessionExpiredError(AppError):
+class HistoryExpiredError(AppError):
     status_code = 410
-    code = "SESSION_EXPIRED"
+    code = "HISTORY_EXPIRED"
 
 
-class SessionClosedError(AppError):
+class HistoryClosedError(AppError):
     status_code = 410
-    code = "SESSION_CLOSED"
+    code = "HISTORY_CLOSED"
 
 
 class DocumentNotFoundError(NotFoundError):

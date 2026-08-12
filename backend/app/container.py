@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from app.clients.gemini_client import GeminiClient
 from app.core.config import Settings
 from app.core.logging import get_logger
-from app.repositories.session_repository import SessionRepository
+from app.repositories.history_repository import HistoryRepository
 from app.repositories.vector_repository import VectorRepository
 from app.services.chunking_service import LegalChunkingService
 from app.services.document_parser import DocumentParser
@@ -16,7 +16,7 @@ from app.services.indexing_service import IndexingService
 from app.services.query_rewrite_service import QueryRewriteService
 from app.services.rag_service import RagService
 from app.services.reranking_service import CrossEncoderReranker
-from app.services.session_service import SessionService
+from app.services.history_service import HistoryService
 from app.services.auth_service import AuthService
 from app.repositories.user_repository import UserRepository
 
@@ -26,7 +26,7 @@ from app.repositories.user_repository import UserRepository
 class AppContainer:
     settings: Settings
 
-    session_repository: SessionRepository
+    history_repository: HistoryRepository
     user_repository: UserRepository
     vector_repository: VectorRepository
 
@@ -37,14 +37,14 @@ class AppContainer:
     query_rewrite_service: QueryRewriteService
     reranker: CrossEncoderReranker
     retrieval_service: HybridRetrievalService
-    session_service: SessionService
+    history_service: HistoryService
     indexing_service: IndexingService
     rag_service: RagService
     auth_service: AuthService
 
 
 def build_container(settings: Settings) -> AppContainer:
-    sessions = SessionRepository(settings.sqlite_path)
+    histories = HistoryRepository(settings.sqlite_path)
 
     users = UserRepository(settings.sqlite_path)
 
@@ -101,16 +101,14 @@ def build_container(settings: Settings) -> AppContainer:
         settings.min_similarity,
         get_logger("slaw.retrieval"),
     )
-    session_service = SessionService(
-        sessions,
+    history_service = HistoryService(
+        histories,
         vectors,
-        settings.session_ttl_minutes,
-        settings.max_session_documents,
-        get_logger("slaw.session"),
+        get_logger("slaw.history"),
     )
     indexing = IndexingService(
-        session_service,
-        sessions,
+        history_service,
+        histories,
         vectors,
         DocumentParser(),
         LegalChunkingService(
@@ -122,8 +120,8 @@ def build_container(settings: Settings) -> AppContainer:
         get_logger("slaw.indexing"),
     )
     rag = RagService(
-        session_service,
-        sessions,
+        history_service,
+        histories,
         query_rewrite,
         retrieval,
         generation,
@@ -132,7 +130,7 @@ def build_container(settings: Settings) -> AppContainer:
     return AppContainer(
         settings=settings,
 
-        session_repository=sessions,
+        history_repository=histories,
         user_repository=users,
         vector_repository=vectors,
 
@@ -143,7 +141,7 @@ def build_container(settings: Settings) -> AppContainer:
         query_rewrite_service=query_rewrite,
         reranker=reranker,
         retrieval_service=retrieval,
-        session_service=session_service,
+        history_service=history_service,
         indexing_service=indexing,
         rag_service=rag,
         auth_service=auth,

@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from jose import jwt
+from jose import JWTError, jwt
 from pwdlib import PasswordHash
 
 
@@ -87,3 +87,19 @@ class AuthService:
             self.jwt_secret,
             algorithm=self.jwt_algorithm,
         )
+
+    def decode_access_token(self, token: str) -> str:
+        try:
+            payload = jwt.decode(
+                token,
+                self.jwt_secret,
+                algorithms=[self.jwt_algorithm],
+            )
+        except JWTError as error:
+            raise ValueError("Access token không hợp lệ") from error
+
+        user_id = payload.get("sub")
+        if not isinstance(user_id, str) or not user_id:
+            raise ValueError("Access token không chứa user_id hợp lệ")
+
+        return user_id

@@ -16,17 +16,24 @@ export type ApiMessage = {
   created_at: string;
 };
 
-export type SessionInfo = {
-  session_id: string;
-  status: string;
+export type HistoryInfo = {
+  history_id: string;
+  user_id: string;
+  title: string;
   created_at: string;
   updated_at: string;
-  expires_at: string;
 };
 
-export type SessionSnapshot = SessionInfo & {
+export type HistorySnapshot = HistoryInfo & {
   documents: ApiDocument[];
   messages: ApiMessage[];
+};
+
+export type HistorySummary = {
+  history_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
 };
 
 export type UploadResult = {
@@ -51,8 +58,11 @@ export type QuestionResult = {
   retrieved_count: number;
 };
 
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_RAG_API_BASE_URL ?? "http://127.0.0.1:8000/api/v1";
+export const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_BASE_URL ??
+  process.env.NEXT_PUBLIC_RAG_API_BASE_URL ??
+  process.env.NEXT_PUBLIC_AUTH_API_BASE_URL ??
+  "http://localhost:8000/api/v1";
 
 export class ApiError extends Error {
   status: number;
@@ -79,7 +89,10 @@ async function readPayload(response: Response) {
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${API_BASE_URL}${url}`, init);
+    response = await fetch(`${API_BASE_URL}${url}`, {
+      credentials: "include",
+      ...init,
+    });
   } catch {
     throw new ApiError(
       "Không kết nối được FastAPI. Hãy kiểm tra backend đang chạy ở cổng 8000.",
@@ -98,51 +111,74 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return payload as T;
 }
 
-export function createSession(): Promise<SessionInfo> {
-  return request<SessionInfo>("/sessions", { method: "POST" });
+export async function login(
+  email: string,
+  password: string,
+): Promise<{ message: string; user: { id: string; full_name: string; email: string; role: string } }> {
+  return request<{ message: string; user: { id: string; full_name: string; email: string; role: string } }>(
+    "/auth/login",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    },
+  );
 }
 
-export function getSession(sessionId: string): Promise<SessionSnapshot> {
-  return request<SessionSnapshot>(`/sessions/${sessionId}`);
+export function createHistory(question?: string): Promise<HistoryInfo> {
+  const body = question ? JSON.stringify({ question }) : undefined;
+  return request<HistoryInfo>("/histories", {
+    method: "POST",
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body,
+  });
 }
 
-export async function closeSession(sessionId: string): Promise<void> {
-  await request<null>(`/sessions/${sessionId}`, { method: "DELETE" });
+export function getHistory(historyId: string): Promise<HistorySnapshot> {
+  return request<HistorySnapshot>(`/histories/${historyId}`);
 }
 
-export function uploadSessionDocuments(
-  sessionId: string,
+export async function closeHistory(historyId: string): Promise<void> {
+  await request<null>(`/histories/${historyId}`, { method: "DELETE" });
+}
+
+export function uploadHistoryDocuments(
+  historyId: string,
   files: File[],
 ): Promise<UploadResult> {
   const body = new FormData();
   files.forEach((file) => body.append("files", file));
-  return request<UploadResult>(`/sessions/${sessionId}/documents`, {
+  return request<UploadResult>(`/histories/${historyId}/documents`, {
     method: "POST",
     body,
   });
 }
 
-export async function deleteSessionDocument(
-  sessionId: string,
+export async function deleteHistoryDocument(
+  historyId: string,
   documentId: string,
 ): Promise<void> {
-  await request<null>(`/sessions/${sessionId}/documents/${documentId}`, {
+  await request<null>(`/histories/${historyId}/documents/${documentId}`, {
     method: "DELETE",
   });
 }
 
-export async function clearSessionDocuments(sessionId: string): Promise<void> {
-  await request<null>(`/sessions/${sessionId}/documents`, { method: "DELETE" });
+export async function clearHistoryDocuments(historyId: string): Promise<void> {
+  await request<null>(`/histories/${historyId}/documents`, { method: "DELETE" });
 }
 
-export function askSessionQuestion(
-  sessionId: string,
+export function askHistoryQuestion(
+  historyId: string,
   question: string,
   topK = 5,
 ): Promise<QuestionResult> {
-  return request<QuestionResult>(`/sessions/${sessionId}/questions`, {
+  return request<QuestionResult>(`/histories/${historyId}/questions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ question, top_k: topK }),
   });
+}
+
+export function listHistories(): Promise<HistorySummary[]> {
+  return request<HistorySummary[]>("/histories");
 }

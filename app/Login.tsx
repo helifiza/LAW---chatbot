@@ -4,31 +4,7 @@ import "./Login.css";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
-
-async function requestLogin({ email, password }: { email: string; password: string }) {
-  const response = await fetch(`${process.env.NEXT_PUBLIC_AUTH_API_BASE_URL}/login`,
-    {
-      method: "POST",
-      headers:{
-        "Content-Type": "application/json",
-      },
-      credentials: "include",
-      body: JSON.stringify({
-        email,
-        password,
-      }),
-    },
-  );
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(
-      payload?.detail ||
-      payload?.error?.message ||
-      payload?.message ||
-      "Đăng nhập sai tài khoản hoặc mật khẩu. Vui lòng thử lại.",
-    );}
-  return payload;
-}
+import { login } from "./Home/api";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -48,7 +24,8 @@ export default function LoginPage() {
     setMessage("");
 
     try {
-      await requestLogin({ email, password });
+      const result = await login(email, password);
+      window.localStorage.setItem("slaw.user", JSON.stringify(result.user));
       setMessage("Đăng nhập thành công. Đang chuyển đến trang chính…");
       router.push("/Home");
     } catch (error) {

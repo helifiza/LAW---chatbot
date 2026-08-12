@@ -6,11 +6,11 @@ from typing import Sequence
 
 from app.core.errors import NoReadyDocumentError
 from app.domain.models import DocumentStatus, MessageRole, SearchResult
-from app.repositories.session_repository import SessionRepository
+from app.repositories.history_repository import HistoryRepository
 from app.services.generation_service import GenerationService
 from app.services.hybrid_retrieval_service import HybridRetrievalService
 from app.services.query_rewrite_service import QueryRewriteService
-from app.services.session_service import SessionService
+from app.services.history_service import HistoryService
 
 
 NOT_FOUND_ANSWER = (
@@ -42,15 +42,15 @@ class RagAnswer:
 class RagService:
     def __init__(
         self,
-        session_service: SessionService,
-        session_repository: SessionRepository,
+        history_service: HistoryService,
+        history_repository: HistoryRepository,
         query_rewrite_service: QueryRewriteService,
         retrieval_service: HybridRetrievalService,
         generation_service: GenerationService,
         history_limit: int,
     ) -> None:
-        self.session_service = session_service
-        self.session_repository = session_repository
+        self.history_service = history_service
+        self.history_repository = history_repository
         self.query_rewrite_service = query_rewrite_service
         self.retrieval_service = retrieval_service
         self.generation_service = generation_service
@@ -96,22 +96,22 @@ class RagService:
 
     def ask(
         self,
-        session_id: str,
+        history_id: str,
         question: str,
         top_k: int,
         include_trace: bool = False,
     ) -> RagAnswer:
         request_started = time.perf_counter()
-        self.session_service.require_active(session_id)
-        ready_count = self.session_repository.count_documents(
-            session_id, statuses=(DocumentStatus.READY.value,)
+        self.history_service.require_active(history_id)
+        ready_count = self.history_repository.count_documents(
+            history_id, statuses=(DocumentStatus.READY.value,)
         )
         if ready_count == 0:
             raise NoReadyDocumentError(
                 "Phiên chưa có tài liệu đã lập chỉ mục thành công"
             )
-        history_records = self.session_repository.list_messages(
-            session_id, limit=self.history_limit
+        history_records = self.history_repository.list_messages(
+            history_id, limit=self.history_limit
         )
         history = [
             (message.role, message.content) for message in history_records
@@ -122,7 +122,7 @@ class RagService:
         rewrite_ms = (time.perf_counter() - rewrite_started) * 1000
 
         retrieval = self.retrieval_service.retrieve(
-            session_id=session_id,
+            history_id=history_id,
             original_query=question,
             dense_query=rewrite.retrieval_query,
             top_k=max(top_k * 2, top_k),
@@ -138,11 +138,9 @@ class RagService:
             generation_ms = (time.perf_counter() - generation_started) * 1000
         else:
             answer = NOT_FOUND_ANSWER
-        self.session_repository.add_message(session_id, MessageRole.USER, question)
-        self.session_repository.add_message(session_id, MessageRole.ASSISTANT, answer)
-        self.session_repository.touch_session(
-            session_id, self.session_service.ttl_minutes
-        )
+        self.history_repository.add_message(history_id, MessageRole.USER, question)
+        self.history_repository.add_message(history_id, MessageRole.ASSISTANT, answer)
+        self.history_repository.touch_history(history_id)
         sources = tuple(
             RagSource(
                 document_id=result.chunk.document_id,

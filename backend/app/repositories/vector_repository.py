@@ -66,8 +66,9 @@ class VectorRepository:
     @staticmethod
     def _metadata(chunk: ChunkDetail) -> dict[str, object]:
         return {
-            "session_id": chunk.session_id,
+            "history_id": chunk.history_id,
             "document_id": chunk.document_id,
+            "user_id": chunk.user_id,
             "file_name": chunk.file_name,
             "page_number": chunk.page_number,
             "page_end_number": chunk.page_end_number,
@@ -88,8 +89,9 @@ class VectorRepository:
         metadata: dict[str, object],
     ) -> ChunkDetail:
         return ChunkDetail(
-            session_id=str(metadata["session_id"]),
+            history_id=str(metadata["history_id"]),
             document_id=str(metadata["document_id"]),
+            user_id=str(metadata["user_id"]),
             element_id=element_id,
             file_name=str(metadata["file_name"]),
             page_number=int(metadata["page_number"]),
@@ -131,11 +133,11 @@ class VectorRepository:
 
     def query(
         self,
-        session_id: str,
+        history_id: str,
         query_embedding: Sequence[float],
         top_k: int,
     ) -> list[SearchResult]:
-        where = {"session_id": session_id}
+        where = {"history_id": history_id}
         with self._lock:
             matching = self._collection.get(where=where, include=[])
             matching_count = len(matching.get("ids") or [])
@@ -165,10 +167,10 @@ class VectorRepository:
             )
         return search_results
 
-    def list_chunks(self, session_id: str) -> list[ChunkDetail]:
+    def list_chunks(self, history_id: str) -> list[ChunkDetail]:
         with self._lock:
             result = self._collection.get(
-                where={"session_id": session_id},
+                where={"history_id": history_id},
                 include=["documents", "metadatas"],
             )
         ids = result.get("ids") or []
@@ -181,20 +183,20 @@ class VectorRepository:
             chunks.append(self._chunk_from_result(element_id, text, metadata))
         return chunks
 
-    def delete_document(self, session_id: str, document_id: str) -> None:
+    def delete_document(self, history_id: str, document_id: str) -> None:
         with self._lock:
             self._collection.delete(
                 where={
                     "$and": [
-                        {"session_id": session_id},
+                        {"history_id": history_id},
                         {"document_id": document_id},
                     ]
                 }
             )
 
-    def delete_session(self, session_id: str) -> None:
+    def delete_history(self, history_id: str) -> None:
         with self._lock:
-            self._collection.delete(where={"session_id": session_id})
+            self._collection.delete(where={"history_id": history_id})
 
     def count(self) -> int:
         with self._lock:

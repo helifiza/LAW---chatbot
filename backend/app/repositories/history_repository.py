@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -12,8 +11,7 @@ from app.domain.models import (
     DocumentStatus,
     MessageRecord,
     MessageRole,
-    SessionRecord,
-    SessionStatus,
+    HistoryRecord,
     utc_now,
 )
 
@@ -26,8 +24,8 @@ def _from_iso(value: str) -> datetime:
     return datetime.fromisoformat(value)
 
 
-class SessionRepository:
-    """Lưu trạng thái phiên, tài liệu và lịch sử chat trong SQLite."""
+class HistoryRepository:
+    """Lưu lịch sử hội thoại, tài liệu và tin nhắn trong SQLite."""
 
     def __init__(self, database_path: Path) -> None:
         self.database_path = database_path
@@ -52,17 +50,21 @@ class SessionRepository:
         with self._connection() as connection:
             connection.executescript(
                 """
-                CREATE TABLE IF NOT EXISTS sessions (
+                CREATE TABLE IF NOT EXISTS history (
                     id TEXT PRIMARY KEY,
-                    status TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    expires_at TEXT NOT NULL
+                    FOREIGN KEY(user_id)
+                        REFERENCES users(id)
+                        ON DELETE CASCADE
                 );
+                CREATE INDEX IF NOT EXISTS idx_history_user ON history(user_id);
 
                 CREATE TABLE IF NOT EXISTS documents (
                     id TEXT PRIMARY KEY,
-                    session_id TEXT NOT NULL,
+                    history_id TEXT NOT NULL,
                     file_name TEXT NOT NULL,
                     mime_type TEXT NOT NULL,
                     size_bytes INTEGER NOT NULL,
@@ -70,41 +72,41 @@ class SessionRepository:
                     chunk_count INTEGER NOT NULL DEFAULT 0,
                     error_message TEXT,
                     created_at TEXT NOT NULL,
-                    FOREIGN KEY(session_id) REFERENCES sessions(id)
+                    FOREIGN KEY(history_id) REFERENCES history(id)
                         ON DELETE CASCADE
                 );
-                CREATE INDEX IF NOT EXISTS idx_documents_session
-                    ON documents(session_id);
+                CREATE INDEX IF NOT EXISTS idx_documents_history
+                    ON documents(history_id);
 
                 CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
+                    history_id TEXT NOT NULL,
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    FOREIGN KEY(session_id) REFERENCES sessions(id)
+                    FOREIGN KEY(history_id) REFERENCES history(id)
                         ON DELETE CASCADE
                 );
-                CREATE INDEX IF NOT EXISTS idx_messages_session
-                    ON messages(session_id, id);
+                CREATE INDEX IF NOT EXISTS idx_messages_history
+                    ON messages(history_id, id);
                 """
             )
 
     @staticmethod
-    def _session_from_row(row: sqlite3.Row) -> SessionRecord:
-        return SessionRecord(
+    def _history_from_row(row: sqlite3.Row) -> HistoryRecord:
+        return HistoryRecord(
             id=row["id"],
-            status=row["status"],
+            user_id=row["user_id"],
+            title=row["title"],
             created_at=_from_iso(row["created_at"]),
             updated_at=_from_iso(row["updated_at"]),
-            expires_at=_from_iso(row["expires_at"]),
         )
 
     @staticmethod
     def _document_from_row(row: sqlite3.Row) -> DocumentRecord:
         return DocumentRecord(
             id=row["id"],
-            session_id=row["session_id"],
+            history_id=row["history_id"],
             file_name=row["file_name"],
             mime_type=row["mime_type"],
             size_bytes=int(row["size_bytes"]),
@@ -118,85 +120,90 @@ class SessionRepository:
     def _message_from_row(row: sqlite3.Row) -> MessageRecord:
         return MessageRecord(
             id=int(row["id"]),
-            session_id=row["session_id"],
+            history_id=row["history_id"],
             role=row["role"],
             content=row["content"],
             created_at=_from_iso(row["created_at"]),
         )
 
-    def create_session(self, ttl_minutes: int) -> SessionRecord:
+    def create_history(self, user_id: str, title: str) -> HistoryRecord:
         now = utc_now()
-        session = SessionRecord(
+        history = HistoryRecord(
             id=str(uuid.uuid4()),
-            status=SessionStatus.ACTIVE.value,
+            user_id = user_id,
+            title=title,
             created_at=now,
             updated_at=now,
-            expires_at=now + timedelta(minutes=ttl_minutes),
         )
         with self._connection() as connection:
             connection.execute(
                 """
-                INSERT INTO sessions(id, status, created_at, updated_at, expires_at)
+                INSERT INTO history(id, user_id, title, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (
-                    session.id,
-                    session.status,
-                    _to_iso(session.created_at),
-                    _to_iso(session.updated_at),
-                    _to_iso(session.expires_at),
+                    history.id,
+                    history.user_id,
+                    history.title,
+                    _to_iso(history.created_at),
+                    _to_iso(history.updated_at),
                 ),
             )
-        return session
+        return history
 
-    def get_session(self, session_id: str) -> SessionRecord | None:
+    def get_history(self, history_id: str) -> HistoryRecord | None:
         with self._connection() as connection:
             row = connection.execute(
-                "SELECT * FROM sessions WHERE id = ?", (session_id,)
+                "SELECT * FROM history WHERE id = ?", (history_id,)
             ).fetchone()
-        return self._session_from_row(row) if row else None
+        return self._history_from_row(row) if row else None
 
-    def touch_session(self, session_id: str, ttl_minutes: int) -> SessionRecord | None:
-        now = utc_now()
-        expires_at = now + timedelta(minutes=ttl_minutes)
-        with self._connection() as connection:
-            connection.execute(
-                """
-                UPDATE sessions
-                SET updated_at = ?, expires_at = ?
-                WHERE id = ? AND status = ?
-                """,
-                (
-                    _to_iso(now),
-                    _to_iso(expires_at),
-                    session_id,
-                    SessionStatus.ACTIVE.value,
-                ),
-            )
-        return self.get_session(session_id)
-
-    def list_expired_session_ids(self, at: datetime | None = None) -> list[str]:
-        moment = at or utc_now()
+    def list_histories_by_user(self, user_id: str) -> list[HistoryRecord]:
+        """Lấy danh sách cuộc trò chuyện của User, sắp xếp theo thời gian mới cập nhật nhất."""
         with self._connection() as connection:
             rows = connection.execute(
                 """
-                SELECT id FROM sessions
-                WHERE expires_at <= ? OR status != ?
+                SELECT * FROM history
+                WHERE user_id = ?
+                ORDER BY updated_at DESC
                 """,
-                (_to_iso(moment), SessionStatus.ACTIVE.value),
+                (user_id,),
             ).fetchall()
-        return [row["id"] for row in rows]
+        return [self._history_from_row(row) for row in rows]
 
-    def delete_session(self, session_id: str) -> bool:
+    def touch_history(self, history_id: str, title: str |None = None) -> HistoryRecord | None:
+        now = utc_now()
+        with self._connection() as connection:
+            if title is not None:
+                connection.execute(
+                    """
+                    UPDATE history
+                    SET updated_at = ?, title = ?
+                    WHERE id = ?
+                    """,
+                    (_to_iso(now), title, history_id),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE history
+                    SET updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (_to_iso(now), history_id),
+                )
+        return self.get_history(history_id)
+
+    def delete_history(self, history_id: str) -> bool:
         with self._connection() as connection:
             cursor = connection.execute(
-                "DELETE FROM sessions WHERE id = ?", (session_id,)
+                "DELETE FROM history WHERE id = ?", (history_id,)
             )
         return cursor.rowcount > 0
 
     def create_document(
         self,
-        session_id: str,
+        history_id: str,
         file_name: str,
         mime_type: str,
         size_bytes: int,
@@ -204,7 +211,7 @@ class SessionRepository:
         now = utc_now()
         document = DocumentRecord(
             id=str(uuid.uuid4()),
-            session_id=session_id,
+            history_id=history_id,
             file_name=file_name,
             mime_type=mime_type,
             size_bytes=size_bytes,
@@ -217,13 +224,13 @@ class SessionRepository:
             connection.execute(
                 """
                 INSERT INTO documents(
-                    id, session_id, file_name, mime_type, size_bytes,
+                    id, history_id, file_name, mime_type, size_bytes,
                     status, chunk_count, error_message, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     document.id,
-                    document.session_id,
+                    document.history_id,
                     document.file_name,
                     document.mime_type,
                     document.size_bytes,
@@ -260,25 +267,25 @@ class SessionRepository:
             ).fetchone()
         return self._document_from_row(row) if row else None
 
-    def list_documents(self, session_id: str) -> list[DocumentRecord]:
+    def list_documents(self, history_id: str) -> list[DocumentRecord]:
         with self._connection() as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM documents
-                WHERE session_id = ?
+                WHERE history_id = ?
                 ORDER BY created_at ASC
                 """,
-                (session_id,),
+                (history_id,),
             ).fetchall()
         return [self._document_from_row(row) for row in rows]
 
     def count_documents(
         self,
-        session_id: str,
+        history_id: str,
         statuses: Sequence[str] | None = None,
     ) -> int:
-        query = "SELECT COUNT(*) FROM documents WHERE session_id = ?"
-        params: list[object] = [session_id]
+        query = "SELECT COUNT(*) FROM documents WHERE history_id = ?"
+        params: list[object] = [history_id]
         if statuses:
             placeholders = ",".join("?" for _ in statuses)
             query += f" AND status IN ({placeholders})"
@@ -286,17 +293,17 @@ class SessionRepository:
         with self._connection() as connection:
             return int(connection.execute(query, params).fetchone()[0])
 
-    def delete_document(self, session_id: str, document_id: str) -> bool:
+    def delete_document(self, history_id: str, document_id: str) -> bool:
         with self._connection() as connection:
             cursor = connection.execute(
-                "DELETE FROM documents WHERE id = ? AND session_id = ?",
-                (document_id, session_id),
+                "DELETE FROM documents WHERE id = ? AND history_id = ?",
+                (document_id, history_id),
             )
         return cursor.rowcount > 0
 
     def add_message(
         self,
-        session_id: str,
+        history_id: str,
         role: MessageRole | str,
         content: str,
     ) -> MessageRecord:
@@ -305,15 +312,15 @@ class SessionRepository:
         with self._connection() as connection:
             cursor = connection.execute(
                 """
-                INSERT INTO messages(session_id, role, content, created_at)
+                INSERT INTO messages(history_id, role, content, created_at)
                 VALUES (?, ?, ?, ?)
                 """,
-                (session_id, role_value, content, _to_iso(now)),
+                (history_id, role_value, content, _to_iso(now)),
             )
             message_id = int(cursor.lastrowid)
         return MessageRecord(
             id=message_id,
-            session_id=session_id,
+            history_id=history_id,
             role=role_value,
             content=content,
             created_at=now,
@@ -321,7 +328,7 @@ class SessionRepository:
 
     def list_messages(
         self,
-        session_id: str,
+        history_id: str,
         limit: int | None = None,
     ) -> list[MessageRecord]:
         with self._connection() as connection:
@@ -329,19 +336,19 @@ class SessionRepository:
                 rows = connection.execute(
                     """
                     SELECT * FROM messages
-                    WHERE session_id = ? ORDER BY id ASC
+                    WHERE history_id = ? ORDER BY id ASC
                     """,
-                    (session_id,),
+                    (history_id,),
                 ).fetchall()
             else:
                 rows = connection.execute(
                     """
                     SELECT * FROM (
                         SELECT * FROM messages
-                        WHERE session_id = ?
+                        WHERE history_id = ?
                         ORDER BY id DESC LIMIT ?
                     ) ORDER BY id ASC
                     """,
-                    (session_id, limit),
+                    (history_id, limit),
                 ).fetchall()
         return [self._message_from_row(row) for row in rows]

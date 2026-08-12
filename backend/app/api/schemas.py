@@ -4,7 +4,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, model_validator, EmailStr,field_validator
 
-from app.domain.models import DocumentRecord, MessageRecord, SessionRecord
+from app.domain.models import DocumentRecord, MessageRecord, HistoryRecord
 from app.services.rag_service import RagAnswer, RagSource
 
 class RegisterRequest(BaseModel):
@@ -24,6 +24,28 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=128)
+
+
+class UserOut(BaseModel):
+    id: str
+    full_name: str
+    email: EmailStr
+    role: str
+
+    @classmethod
+    def from_dict(cls, value: dict[str, str]) -> "UserOut":
+        return cls(
+            id=value["id"],
+            full_name=value["full_name"],
+            email=value["email"],
+            role=value["role"],
+        )
+
+
+class AuthResponse(BaseModel):
+    message: str
+    user: UserOut
+
 
 class DocumentOut(BaseModel):
     id: str
@@ -65,37 +87,39 @@ class MessageOut(BaseModel):
         )
 
 
-class SessionOut(BaseModel):
-    session_id: str
-    status: str
+class CreateHistoryRequest(BaseModel):
+    question: str | None = Field(default=None, min_length=1, max_length=4000)
+
+
+class HistoryOut(BaseModel):
+    history_id: str
+    title: str
     created_at: datetime
     updated_at: datetime
-    expires_at: datetime
 
     @classmethod
-    def from_record(cls, value: SessionRecord) -> "SessionOut":
+    def from_record(cls, value: HistoryRecord) -> "HistoryOut":
         return cls(
-            session_id=value.id,
-            status=value.status,
+            history_id=value.id,
+            title=value.title,
             created_at=value.created_at,
             updated_at=value.updated_at,
-            expires_at=value.expires_at,
         )
 
 
-class SessionSnapshotOut(SessionOut):
+class HistorySnapshotOut(HistoryOut):
     documents: list[DocumentOut]
     messages: list[MessageOut]
 
     @classmethod
     def from_records(
         cls,
-        session: SessionRecord,
+        history: HistoryRecord,
         documents: list[DocumentRecord],
         messages: list[MessageRecord],
-    ) -> "SessionSnapshotOut":
+    ) -> "HistorySnapshotOut":
         return cls(
-            **SessionOut.from_record(session).model_dump(),
+            **HistoryOut.from_record(history).model_dump(),
             documents=[DocumentOut.from_record(item) for item in documents],
             messages=[MessageOut.from_record(item) for item in messages],
         )

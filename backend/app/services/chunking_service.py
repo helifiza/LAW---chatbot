@@ -331,8 +331,9 @@ class LegalChunkingService:
     #hàm chính gộp cả giai đoạn 1 và 2
     def chunk_pages(
         self,
-        session_id: str,
+        history_id: str,
         document_id: str,
+        user_id: str,
         file_name: str,
         pages: Sequence[tuple[int, str]],
         remove_bare_page_numbers: bool = True,
@@ -355,8 +356,9 @@ class LegalChunkingService:
                 chunk_index = len(chunks)
                 chunks.append(
                     ChunkDetail(
-                        session_id=session_id,
+                        history_id=history_id,
                         document_id=document_id,
+                        user_id=user_id,
                         element_id=f"{document_id}:chunk:{chunk_index}",
                         file_name=file_name,
                         page_number=start_page,
@@ -373,8 +375,8 @@ class LegalChunkingService:
                     )
                 )
         self.logger.info(
-            "Chunking hoàn tất | session=%s document=%s chunks=%s",
-            session_id,
+            "Chunking hoàn tất | history=%s document=%s chunks=%s",
+            history_id,
             document_id,
             len(chunks),
         )
