@@ -8,13 +8,11 @@ from enum import StrEnum
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
-"""
-#bỏ đi
+
 class HistoryStatus(StrEnum):
     ACTIVE = "active"
-    CLOSED = "closed"
+    ARCHIVED = "archived"
 
-"""
 class DocumentStatus(StrEnum):
     PROCESSING = "processing"
     READY = "ready"
@@ -31,6 +29,7 @@ class HistoryRecord:
     id: str
     user_id: str
     title: str
+    status: str
     created_at: datetime
     updated_at: datetime
 

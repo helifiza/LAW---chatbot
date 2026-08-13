@@ -32,6 +32,10 @@ class HistoryClosedError(AppError):
 class DocumentNotFoundError(NotFoundError):
     code = "DOCUMENT_NOT_FOUND"
 
+class HistoryArchivedError(Exception):
+    """Raised khi thao tác bị chặn vì history đang ở trạng thái archived."""
+    pass
+
 
 class UnsupportedFileTypeError(AppError):
     status_code = 415

@@ -7,6 +7,7 @@ from app.core.errors import (
     DocumentLimitError,
     DocumentNotFoundError,
     HistoryNotFoundError,
+    HistoryArchivedError,
 )
 from app.domain.models import (
     DocumentRecord,
@@ -14,6 +15,7 @@ from app.domain.models import (
     MessageRecord,
     MessageRole,
     HistoryRecord,
+    HistoryStatus,
     utc_now,
 )
 from app.repositories.history_repository import HistoryRepository
@@ -39,10 +41,17 @@ class HistoryService:
         self.logger.info("Tạo lịch sử | history=%s user=%s", history.id, user_id)
         return history
 
-    def require_active(self, history_id: str) -> HistoryRecord:
+    def get_any(self, history_id: str) -> HistoryRecord:
+        """Lấy trạng thái history để xem nội dung dù nó đã bị đóng hay chưa"""
         history = self.repository.get_history(history_id)
         if history is None:
             raise HistoryNotFoundError("Không tìm thấy lịch sử")
+        return history
+
+    def require_active(self, history_id: str) -> HistoryRecord:
+        history = self.repository.get_history(history_id)
+        if history.status == HistoryStatus.ARCHIVED:
+            raise HistoryArchivedError("Lịch sử đã được lưu trữ, vui lòng mở lại trước khi tiếp tục")
         return history
 
     def list_histories_by_user(self, user_id: str) -> list[HistoryRecord]:
@@ -51,12 +60,26 @@ class HistoryService:
     def snapshot(
         self, history_id: str
     ) -> tuple[HistoryRecord, list[DocumentRecord], list[MessageRecord]]:
-        history = self.require_active(history_id)
+        history = self.get_any(history_id)
         return (
             history,
             self.repository.list_documents(history_id),
             self.repository.list_messages(history_id),
         )
+
+    def archive(self, history_id: str) -> HistoryRecord:
+        self.require_active(history_id)
+        updated = self.repository.set_history_status(history_id, HistoryStatus.ARCHIVED.value)
+        self.logger.info("Lưu trữ lịch sử | history=%s", history_id)
+        return updated
+
+    def reopen(self, history_id: str) -> HistoryRecord:
+        history = self.get_any(history_id)
+        if history.status == HistoryStatus.ACTIVE.value:
+            return history
+        updated = self.repository.set_history_status(history_id, HistoryStatus.ACTIVE.value)
+        self.logger.info("Mở lại lịch sử | history=%s", history_id)
+        return updated
 
     def start_document(
         self,
@@ -71,7 +94,7 @@ class HistoryService:
         )
 
     def list_documents(self, history_id: str) -> list[DocumentRecord]:
-        self.require_active(history_id)
+        self.get_any(history_id)
         return self.repository.list_documents(history_id)
 
     def delete_document(self, history_id: str, document_id: str) -> None:
@@ -114,3 +137,14 @@ class HistoryService:
     def recent_messages(self, history_id: str, limit: int) -> list[MessageRecord]:
         self.require_active(history_id)
         return self.repository.list_messages(history_id, limit=limit)
+
+    def message_count(self, history_id: str) -> int:
+        """Đếm số tin nhắn hiện có, để xác định đây có phải câu hỏi đầu tiên không."""
+        self.get_any(history_id)
+        return len(self.repository.list_messages(history_id))
+
+    def rename(self, history_id: str, title: str) -> HistoryRecord:
+        """Cập nhật title sau khi sinh được title từ câu hỏi đầu tiên."""
+        updated = self.repository.touch_history(history_id, title=title)
+        self.logger.info("Cập nhật title | history=%s title=%s", history_id, title)
+        return updated

@@ -94,6 +94,7 @@ class CreateHistoryRequest(BaseModel):
 class HistoryOut(BaseModel):
     history_id: str
     title: str
+    status: str
     created_at: datetime
     updated_at: datetime
 
@@ -102,6 +103,7 @@ class HistoryOut(BaseModel):
         return cls(
             history_id=value.id,
             title=value.title,
+            status=value.status,
             created_at=value.created_at,
             updated_at=value.updated_at,
         )

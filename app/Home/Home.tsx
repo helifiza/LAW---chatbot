@@ -14,7 +14,7 @@ import {
   ApiError,
   askHistoryQuestion,
   clearHistoryDocuments,
-  closeHistory,
+  archiveHistory,
   createHistory,
   deleteHistoryDocument,
   getHistory,
@@ -440,7 +440,7 @@ export default function Home() {
     try {
       if (historyId) {
         try {
-          await closeHistory(historyId);
+          await archiveHistory(historyId);
         } catch {
           /* phiên có thể đã hết hạn */
         }

@@ -12,7 +12,9 @@ from app.api.routers import auth, chat, documents, health, histories
 from app.container import AppContainer, build_container
 from app.core.config import Settings
 from app.core.errors import AppError
+from app.core.errors import HistoryArchivedError
 from app.core.logging import configure_logging
+
 
 settings = Settings.from_env()
 configure_logging(settings.log_level)
@@ -99,4 +101,10 @@ def root() -> dict[str, str]:
         "docs": "/docs",
         "health": f"{settings.api_prefix}/health",
     }
-    
+
+@app.exception_handler(HistoryArchivedError)
+def handle_history_archived(request, exc: HistoryArchivedError):
+    return JSONResponse(
+        status_code = 409,
+        content = {"error": {"message": str(exc), "code": " HISTORY_ARCHIVED"}},
+    )

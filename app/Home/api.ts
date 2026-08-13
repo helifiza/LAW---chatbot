@@ -16,10 +16,13 @@ export type ApiMessage = {
   created_at: string;
 };
 
+export type HistoryStatus = "active" | "archived";
+
 export type HistoryInfo = {
   history_id: string;
   user_id: string;
   title: string;
+  status: HistoryStatus;
   created_at: string;
   updated_at: string;
 };
@@ -32,9 +35,11 @@ export type HistorySnapshot = HistoryInfo & {
 export type HistorySummary = {
   history_id: string;
   title: string;
+  status: HistoryStatus;
   created_at: string;
   updated_at: string;
 };
+
 
 export type UploadResult = {
   documents: ApiDocument[];
@@ -181,4 +186,12 @@ export function askHistoryQuestion(
 
 export function listHistories(): Promise<HistorySummary[]> {
   return request<HistorySummary[]>("/histories");
+}
+
+export function archiveHistory(historyId: string): Promise<HistoryInfo> {
+  return request<HistoryInfo>(`/histories/${historyId}/archive`, { method: "PATCH" });
+}
+
+export function reopenHistory(historyId: string): Promise<HistoryInfo> {
+  return request<HistoryInfo>(`/histories/${historyId}/reopen`, { method: "PATCH" });
 }

@@ -9,6 +9,7 @@ from typing import Iterator, Sequence
 from app.domain.models import (
     DocumentRecord,
     DocumentStatus,
+    HistoryStatus,
     MessageRecord,
     MessageRole,
     HistoryRecord,
@@ -53,6 +54,7 @@ class HistoryRepository:
                 CREATE TABLE IF NOT EXISTS history (
                     id TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
                     title TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -98,6 +100,7 @@ class HistoryRepository:
             id=row["id"],
             user_id=row["user_id"],
             title=row["title"],
+            status=row["status"], 
             created_at=_from_iso(row["created_at"]),
             updated_at=_from_iso(row["updated_at"]),
         )
@@ -132,19 +135,21 @@ class HistoryRepository:
             id=str(uuid.uuid4()),
             user_id = user_id,
             title=title,
+            status=HistoryStatus.ACTIVE.value,
             created_at=now,
             updated_at=now,
         )
         with self._connection() as connection:
             connection.execute(
                 """
-                INSERT INTO history(id, user_id, title, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO history(id, user_id, title,status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     history.id,
                     history.user_id,
                     history.title,
+                    history.status,
                     _to_iso(history.created_at),
                     _to_iso(history.updated_at),
                 ),
@@ -158,17 +163,24 @@ class HistoryRepository:
             ).fetchone()
         return self._history_from_row(row) if row else None
 
-    def list_histories_by_user(self, user_id: str) -> list[HistoryRecord]:
-        """Lấy danh sách cuộc trò chuyện của User, sắp xếp theo thời gian mới cập nhật nhất."""
+    def set_history_status(self, history_id: str, status: str) -> HistoryRecord | None:
+        now = utc_now()
         with self._connection() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM history
-                WHERE user_id = ?
-                ORDER BY updated_at DESC
-                """,
-                (user_id,),
-            ).fetchall()
+            connection.execute(
+                "UPDATE history SET status = ?, updated_at = ? WHERE id = ?",
+                (status, _to_iso(now), history_id),
+            )
+        return self.get_history(history_id)
+
+    def list_histories_by_user(self, user_id: str, status: str | None = None) -> list[HistoryRecord]:
+        query = "SELECT * FROM history WHERE user_id = ?"
+        params: list[object] = [user_id]
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY updated_at DESC"
+        with self._connection() as connection:
+            rows = connection.execute(query, params).fetchall()
         return [self._history_from_row(row) for row in rows]
 
     def touch_history(self, history_id: str, title: str |None = None) -> HistoryRecord | None:

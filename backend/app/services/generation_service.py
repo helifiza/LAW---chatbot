@@ -14,7 +14,7 @@ Trích nguồn ngay sau ý tương ứng theo dạng [tên file, trang X] hoặc
 Trả lời bằng tiếng Việt, rõ ràng và đúng trọng tâm."""
 
 TITLE_PROMPT = SYSTEM_PROMPT + """
-Ngoài việc trả lời câu hỏi, hãy sinh thêm một tiêu đề ngắn gọn (tối đa 7 từ) tóm tắt chủ đề của câu hỏi này, dùng để đặt tên cho cuộc trò chuyện. Không dùng ngoặc kép, không chấm câu ở cuối.
+Ngoài việc trả lời câu hỏi, hãy sinh thêm một tiêu đề ngắn gọn (tối đa 10 từ) tóm tắt chủ đề của câu hỏi này, dùng để đặt tên cho cuộc trò chuyện. Không dùng ngoặc kép, không chấm câu ở cuối.
 Chỉ trả về JSON theo đúng định dạng sau, không thêm markdown, {"title": "...", "answer": "..."}
 """
 DEFAULT_TITLE = "Cuộc trò chuyện mới"
@@ -59,7 +59,7 @@ class GenerationService:
     ) -> tuple[str, str]:
         """
         Chỉ dùng cho tin nhắn ĐẦU TIÊN của 1 history.
-        Sinh cùng lúc tiêu đề (tối đa 7 từ) và câu trả lời trong 1 lệnh gọi duy nhất, giúp tiết kiện chi phí so với gọi riêng 2 lần.
+        Sinh cùng lúc tiêu đề (tối đa 10 từ) và câu trả lời trong 1 lệnh gọi duy nhất, giúp tiết kiện chi phí so với gọi riêng 2 lần.
         Trả về (title, answer).
         """
         user_prompt = f"NGỮ CẢNH: \n{context}\n\n CÂU HỎI: {question}"
@@ -95,8 +95,8 @@ class GenerationService:
             answer = str(data.get("answer")or "").strip()
             if not answer:
                 raise ValueError("Không tìm thấy trường answer, answer rỗng")
-            title = cls._limit_words(title, 7) or DEFAULT_TITLE
+            title = cls._limit_words(title, 10) or DEFAULT_TITLE
             return title,answer
         except (json.JSONDecodeError, ValueError, AttributeError):
-            fallback_title = cls._limit_words(fallback_source, 7) or DEFAULT_TITLE
+            fallback_title = cls._limit_words(fallback_source, 10) or DEFAULT_TITLE
             return fallback_title, raw.strip()
