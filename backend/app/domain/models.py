@@ -53,6 +53,7 @@ class MessageRecord:
     history_id: str
     role: str
     content: str
+    sources: str | None
     created_at: datetime
 
 

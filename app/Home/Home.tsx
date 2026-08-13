@@ -193,6 +193,19 @@ function messagesFromSnapshot(snapshot: HistorySnapshot): Message[] {
       id: `server-${message.id}`,
       role: message.role,
       content: message.content,
+      sources: message.sources?.map((s) => ({
+        fileName: s.file_name,
+        locator: [
+          s.page_number === s.page_end_number
+            ? `Trang ${s.page_number}`
+            : `Trang ${s.page_number}-${s.page_end_number}`,
+          s.dieu,
+          `score=${s.score.toFixed(3)}`,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        excerpt: s.excerpt,
+      })),
     })),
   ];
 }

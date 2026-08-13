@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, model_validator, EmailStr,field_validator
 
 from app.domain.models import DocumentRecord, MessageRecord, HistoryRecord
 from app.services.rag_service import RagAnswer, RagSource
+import json
 
 class RegisterRequest(BaseModel):
     full_name: str = Field(min_length=2, max_length=100)
@@ -70,19 +71,38 @@ class DocumentOut(BaseModel):
             created_at=value.created_at,
         )
 
+class SourceOut(BaseModel):
+    document_id: str
+    file_name: str
+    page_number: int
+    page_end_number: int
+    dieu: str | None
+    score: float
+    excerpt: str
+
+    @classmethod
+    def from_source(cls, source: RagSource) -> "SourceOut":
+        return cls(**source.__dict__)
+
 
 class MessageOut(BaseModel):
     id: int
     role: str
     content: str
+    sources: list[SourceOut] | None = None
     created_at: datetime
 
     @classmethod
     def from_record(cls, value: MessageRecord) -> "MessageOut":
+        parsed_sources = None
+        if value.sources:
+            raw = json.loads(value.sources)
+            parsed_sources = [SourceOut(**item) for item in raw]
         return cls(
             id=value.id,
             role=value.role,
             content=value.content,
+            sources = parsed_sources,
             created_at=value.created_at,
         )
 
@@ -168,20 +188,6 @@ class QuestionRequest(BaseModel):
             )
 
         return cleaned
-
-
-class SourceOut(BaseModel):
-    document_id: str
-    file_name: str
-    page_number: int
-    page_end_number: int
-    dieu: str | None
-    score: float
-    excerpt: str
-
-    @classmethod
-    def from_source(cls, source: RagSource) -> "SourceOut":
-        return cls(**source.__dict__)
 
 
 class QuestionResponse(BaseModel):

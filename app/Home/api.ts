@@ -13,6 +13,7 @@ export type ApiMessage = {
   id: number;
   role: "user" | "assistant";
   content: string;
+  sources: QuestionSource[] | null;
   created_at: string;
 };
 

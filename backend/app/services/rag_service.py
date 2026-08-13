@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import json
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -138,21 +139,27 @@ class RagService:
             generation_ms = (time.perf_counter() - generation_started) * 1000
         else:
             answer = NOT_FOUND_ANSWER
-        self.history_repository.add_message(history_id, MessageRole.USER, question)
-        self.history_repository.add_message(history_id, MessageRole.ASSISTANT, answer)
-        self.history_repository.touch_history(history_id)
+
         sources = tuple(
-            RagSource(
-                document_id=result.chunk.document_id,
-                file_name=result.chunk.file_name,
-                page_number=result.chunk.page_number,
-                page_end_number=result.chunk.page_end_number,
-                dieu=result.chunk.dieu,
-                score=round(result.score, 4),
-                excerpt=result.chunk.text[:600],
-            )
-            for result in results
+                    RagSource(
+                        document_id=result.chunk.document_id,
+                        file_name=result.chunk.file_name,
+                        page_number=result.chunk.page_number,
+                        page_end_number=result.chunk.page_end_number,
+                        dieu=result.chunk.dieu,
+                        score=round(result.score, 4),
+                        excerpt=result.chunk.text[:600],
+                    )
+                    for result in results
+                )
+        self.history_repository.add_message(history_id, MessageRole.USER, question)
+        self.history_repository.add_message(
+            history_id,
+            MessageRole.ASSISTANT,
+            answer,
+            sources = json.dumps([s.__dict__ for s in sources], ensure_ascii=False) if sources else None,
         )
+        self.history_repository.touch_history(history_id)
 
         trace: dict[str, object] | None = None
         if include_trace:

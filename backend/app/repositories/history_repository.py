@@ -85,6 +85,7 @@ class HistoryRepository:
                     history_id TEXT NOT NULL,
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
+                    sources TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(history_id) REFERENCES history(id)
                         ON DELETE CASCADE
@@ -126,6 +127,7 @@ class HistoryRepository:
             history_id=row["history_id"],
             role=row["role"],
             content=row["content"],
+            sources=row["sources"],
             created_at=_from_iso(row["created_at"]),
         )
 
@@ -318,16 +320,17 @@ class HistoryRepository:
         history_id: str,
         role: MessageRole | str,
         content: str,
+        sources: str | None = None,
     ) -> MessageRecord:
         now = utc_now()
         role_value = role.value if isinstance(role, MessageRole) else role
         with self._connection() as connection:
             cursor = connection.execute(
                 """
-                INSERT INTO messages(history_id, role, content, created_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO messages(history_id, role, content, sources, created_at)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (history_id, role_value, content, _to_iso(now)),
+                (history_id, role_value, content,sources, _to_iso(now)),
             )
             message_id = int(cursor.lastrowid)
         return MessageRecord(
@@ -335,6 +338,7 @@ class HistoryRepository:
             history_id=history_id,
             role=role_value,
             content=content,
+            sources=sources,
             created_at=now,
         )
 
