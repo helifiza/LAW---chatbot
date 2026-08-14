@@ -120,13 +120,14 @@ def build_container(settings: Settings) -> AppContainer:
         get_logger("slaw.indexing"),
     )
     rag = RagService(
-        history_service,
-        histories,
-        query_rewrite,
-        retrieval,
-        generation,
-        settings.history_message_limit,
-    )
+    history_service=history_service,
+    history_repository=histories,
+    query_rewrite_service=query_rewrite,
+    retrieval_service=retrieval,
+    generation_service=generation,
+    embedding_client=embeddings,
+    history_limit=settings.history_message_limit,
+)
     return AppContainer(
         settings=settings,
 

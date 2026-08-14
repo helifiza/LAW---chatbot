@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import re
 import time
 import json
+import statistics
+import unicodedata
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Sequence
 
 from app.core.errors import NoReadyDocumentError
@@ -14,10 +18,55 @@ from app.services.query_rewrite_service import QueryRewriteService
 from app.services.history_service import HistoryService
 
 
+try:
+    from rapidfuzz import fuzz
+
+    def _token_similarity(a: str, b: str) -> float:
+        return fuzz.token_set_ratio(a, b) / 100
+except ImportError:  # fallback nếu chưa cài rapidfuzz
+    def _token_similarity(a: str, b: str) -> float:
+        return SequenceMatcher(None, a, b).ratio()
+
+
 NOT_FOUND_ANSWER = (
     "Không tìm thấy thông tin liên quan trong các tài liệu của phiên để trả lời "
     "câu hỏi này."
 )
+
+ANTI_HALLUCINATION_ANSWER = (
+    "Hệ thống không thể xác thực câu trả lời với nguồn tài liệu đã truy xuất, "
+    "nên không thể cung cấp câu trả lời đáng tin cậy cho câu hỏi này. "
+    "Vui lòng thử diễn đạt lại câu hỏi hoặc kiểm tra trực tiếp tài liệu."
+)
+
+# Chỉ giữ MỘT định nghĩa duy nhất cho các hằng số citation (bản trước có 2 lần
+# định nghĩa CITATION_PATTERN, lần sau đè mất lần trước và làm mất regex nới
+# rộng hỗ trợ "tr." / dấu gạch en-dash).
+CITATION_PATTERN = re.compile(
+    r"\[([^\[\],]+),\s*(?:trang|tr\.?)\s*(\d+)\s*(?:[-–]\s*(\d+))?\]"
+)#dùng để tìm citiation dạng [tên tài liệu, trang X-Y]
+CITATION_MATCH_THRESHOLD = 0.70          # ngưỡng khớp tên file (string/token)
+CITATION_COVERAGE_THRESHOLD = 0.80       # % citation hợp lệ / tổng citation
+SEMANTIC_Z_THRESHOLD = 1.0               # claim phải "nổi bật" >= 1 std so với các nguồn khác
+SEMANTIC_MIN_CANDIDATES = 2              # cần ít nhất 2 nguồn mới tính z-score có ý nghĩa
+
+#hàm chuẩn hóa tên file để dễ so sánh tìm kiếm và đối chiếu document, ví dụ Luật đất đai-2024.pdf sẽ thành luật đất đai 2024
+def _normalize_filename(name: str) -> str:
+    name = unicodedata.normalize("NFC", name)
+    name = name.lower().strip()
+    name = re.sub(r"\.(pdf|docx?|txt)$", "", name)
+    name = re.sub(r"[_\-\.]+", " ", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name
+
+#hàm tính cosine similarity, để đo độ tương đồng giữa 2 vector a và b, cosine càng gần 1 thì càng có độ tương đồng cao
+def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(y * y for y in b) ** 0.5
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
 
 @dataclass(frozen=True)
@@ -48,6 +97,7 @@ class RagService:
         query_rewrite_service: QueryRewriteService,
         retrieval_service: HybridRetrievalService,
         generation_service: GenerationService,
+        embedding_client,          
         history_limit: int,
     ) -> None:
         self.history_service = history_service
@@ -55,15 +105,21 @@ class RagService:
         self.query_rewrite_service = query_rewrite_service
         self.retrieval_service = retrieval_service
         self.generation_service = generation_service
+        self.embedding_client = embedding_client
         self.history_limit = history_limit
 
+    # ------------------------------------------------------------------
+    # Dedup / format context
+    # ------------------------------------------------------------------
+
+#hàm jaccard này lấy giao là những từ xuất hiện ở cả 2 tập a và b, lấy hợp là tất cả các từ xuất hiện trong ít nhất một bên
     @staticmethod
-    def _jaccard(first: str, second: str) -> float:
+    def _jaccard(first: str, second: str) -> float:#hàm đo độ giống nhau của 2 chunk, dùng Jaccard Similarity: |A giao B|/|A hợp B|
         a, b = set(first.lower().split()), set(second.lower().split())
         if not a or not b:
             return 0.0
         return len(a & b) / len(a | b)
-
+#loại chunk trùng nhau bằng hàm jaccard, nếu độ giống nhau >= 0.90 thì coi là trùng nhau, chỉ giữ lại chunk có điểm cao hơn
     def _deduplicate(
         self, results: Sequence[SearchResult], top_k: int
     ) -> list[SearchResult]:
@@ -94,6 +150,148 @@ class RagService:
                 heading += f" | {chunk.dieu}"
             sections.append(f"{heading}]\n{chunk.text}")
         return "\n\n---\n\n".join(sections)
+
+    # ------------------------------------------------------------------
+    # Citation validation (string match và semantic z-score)
+    # ------------------------------------------------------------------
+    #so tên file bằng hàm token_similarity
+    @staticmethod
+    def _similarity(a: str, b: str) -> float:
+        return _token_similarity(_normalize_filename(a), _normalize_filename(b))
+
+    #hàm cắt câu chứa citattion trong câu trả lời của model để sau đó kiểm tra xem nguồn được citation có thật sự hỗ trợ nội dung mà LLM(gemini) vừa trả lời?
+    @staticmethod
+    def _extract_claim_sentence(answer: str, citation_start: int) -> str:
+        """
+        Lấy câu chứa citation, tính từ vị trí bắt đầu của dấu '[' lùi về đến
+        dấu kết câu gần nhất trước đó (. ! ? hoặc xuống dòng), và tới dấu kết
+        câu gần nhất sau citation. Dùng để so embedding thay vì so cả câu trả
+        lời (tránh loãng ngữ nghĩa với các claim khác trong cùng answer).
+        """
+        left = max(
+            answer.rfind(".", 0, citation_start),
+            answer.rfind("\n", 0, citation_start),
+            answer.rfind("!", 0, citation_start),
+            answer.rfind("?", 0, citation_start),
+        )
+        left = left + 1 if left != -1 else 0
+
+        end_search_start = citation_start
+        right_candidates = [
+            pos for pos in (
+                answer.find(".", end_search_start),
+                answer.find("\n", end_search_start),
+                answer.find("!", end_search_start),
+                answer.find("?", end_search_start),
+            ) if pos != -1
+        ]
+        right = min(right_candidates) if right_candidates else len(answer)
+
+        return answer[left:right].strip()
+
+    def _embed_excerpts(self, sources: Sequence[RagSource]) -> list[list[float]]:
+        """
+        Embed excerpt của TẤT CẢ sources trong 1 lệnh gọi batch duy nhất cho
+        mỗi request (EmbeddingService.embed_texts tự chia theo batch_size),
+        để tái sử dụng cho mọi citation trong answer thay vì embed lại từng
+        excerpt cho mỗi citation. Dùng task_type RETRIEVAL_DOCUMENT vì excerpt
+        là nội dung tài liệu gốc.
+        """
+        return self.embedding_client.embed_texts(
+            [source.excerpt for source in sources]
+        )
+    #so sánh độ tương đồng ngữ nghĩa bằng hàm cosine
+    def _semantic_scores(
+        self, claim_vec: Sequence[float], excerpt_vecs: Sequence[Sequence[float]]
+    ) -> dict[int, float]:
+        return {idx: _cosine(claim_vec, vec) for idx, vec in enumerate(excerpt_vecs)}
+
+    def _validate_citations(
+        self, answer: str, sources: Sequence[RagSource]
+    ) -> dict[str, object]:
+        """
+        Trích các citation dạng [file, trang X] trong answer, so khớp MỜ
+        (token-based, sau chuẩn hoá tên file) với tên file trong sources, rồi
+        xác thực thêm bằng semantic z-score giữa câu chứa citation và excerpt
+        của nguồn khớp nhất. Câu trả lời chỉ được chấp nhận nếu tỷ lệ citation
+        hợp lệ (matched / total) >= CITATION_COVERAGE_THRESHOLD.
+        """
+        matched: list[dict[str, object]] = []
+        unmatched: list[dict[str, object]] = []
+
+        excerpt_vecs: list[list[float]] | None = None
+        if len(sources) >= SEMANTIC_MIN_CANDIDATES:
+            excerpt_vecs = self._embed_excerpts(sources)
+
+        for match in CITATION_PATTERN.finditer(answer):
+            file_cited, p1_str, p2_str = match.group(1), match.group(2), match.group(3)
+            p1 = int(p1_str)
+            p2 = int(p2_str) if p2_str else p1
+
+            # Check Bước 1: khớp tên file / trang (string)
+            best_name_score = 0.0
+            best_source_idx: int | None = None
+            for idx, source in enumerate(sources):
+                name_score = self._similarity(file_cited, source.file_name)
+                page_overlap = not (p2 < source.page_number or p1 > source.page_end_number)
+                # Trang không khớp -> phạt điểm similarity một nửa, coi như
+                # citation trỏ sai vị trí dù tên file đúng.
+                effective_score = name_score if page_overlap else name_score * 0.5
+                if effective_score > best_name_score:
+                    best_name_score = effective_score
+                    best_source_idx = idx
+
+            entry: dict[str, object] = {
+                "cited_file": file_cited.strip(),
+                "cited_page": f"{p1}-{p2}" if p2 != p1 else str(p1),
+                "match_score": round(best_name_score, 4),
+                "matched_file": sources[best_source_idx].file_name if best_source_idx is not None else None,
+                "semantic_score": None,
+                "semantic_z": None,
+                "semantic_supported": None,
+            }
+
+            name_page_ok = best_name_score >= CITATION_MATCH_THRESHOLD #nếu bước 1 độ chính xác >70% thì coi như đạt yêu câu bước 1
+
+            # Check Bước 2: chỉ chạy semantic check nếu name/page đã khớp
+            if name_page_ok and best_source_idx is not None and excerpt_vecs is not None:
+                claim = self._extract_claim_sentence(answer, match.start())
+                # RETRIEVAL_QUERY vì claim đang đóng vai trò "truy vấn" xem
+                # có khớp ngữ nghĩa với excerpt (RETRIEVAL_DOCUMENT) hay không.
+                claim_vec = self.embedding_client.embed_query(claim)
+                sem_scores = self._semantic_scores(claim_vec, excerpt_vecs)#tính điểm cosine similarity giữa claim và tất cả các excerpt
+
+                target_score = sem_scores[best_source_idx]
+                other_scores = [s for i, s in sem_scores.items() if i != best_source_idx]
+
+                if other_scores:
+                    mean_other = statistics.mean(other_scores)
+                    stdev_other = statistics.pstdev(other_scores) or 1e-6
+                    z = (target_score - mean_other) / stdev_other
+                else:
+                    z = float("inf")  # không có nền để so sánh -> không loại trừ được
+
+                entry["semantic_score"] = round(target_score, 4)
+                entry["semantic_z"] = round(z, 4)
+                entry["semantic_supported"] = z >= SEMANTIC_Z_THRESHOLD
+
+            is_valid = name_page_ok and entry["semantic_supported"] is not False
+            (matched if is_valid else unmatched).append(entry)
+
+        total = len(matched) + len(unmatched)
+        coverage = (len(matched) / total) if total else 0.0 #tính toán xem số lượng citation answer do model đưa ra có > 80% không, nếu không thì câu trả lời đưa ra khômg đủ tin cậy => ANTI_HALLUCINATION
+
+        return {
+            "citation_count": total,
+            "matched_citations": matched,
+            "unmatched_citations": unmatched,
+            "coverage": round(coverage, 4),
+            "has_valid_citation": total > 0 and coverage >= CITATION_COVERAGE_THRESHOLD,
+        }
+
+    # ------------------------------------------------------------------
+    # Main entrypoint
+    # ------------------------------------------------------------------
 
     def ask(
         self,
@@ -129,35 +327,43 @@ class RagService:
             top_k=max(top_k * 2, top_k),
         )
         results = self._deduplicate(retrieval.results, top_k)
-
+        sources = tuple(
+            RagSource(
+                document_id=result.chunk.document_id,
+                file_name=result.chunk.file_name,
+                page_number=result.chunk.page_number,
+                page_end_number=result.chunk.page_end_number,
+                dieu=result.chunk.dieu,
+                score=round(result.score, 4),
+                excerpt=result.chunk.text[:600],
+            )
+            for result in results
+        )
         generation_ms = 0.0
+        citation_validation: dict[str, object] | None = None
+
         if results:
             generation_started = time.perf_counter()
-            answer = self.generation_service.generate(
+            raw_answer = self.generation_service.generate(
                 question, self._format_context(results), history
             )
             generation_ms = (time.perf_counter() - generation_started) * 1000
+            citation_validation = self._validate_citations(raw_answer, sources)
+            if citation_validation["has_valid_citation"]:
+                answer = raw_answer
+            else:
+                # Coverage citation không đạt ngưỡng tin cậy -> nghi ngờ model
+                # bịa nguồn hoặc trả lời không dựa trên context.
+                answer = ANTI_HALLUCINATION_ANSWER
         else:
             answer = NOT_FOUND_ANSWER
 
-        sources = tuple(
-                    RagSource(
-                        document_id=result.chunk.document_id,
-                        file_name=result.chunk.file_name,
-                        page_number=result.chunk.page_number,
-                        page_end_number=result.chunk.page_end_number,
-                        dieu=result.chunk.dieu,
-                        score=round(result.score, 4),
-                        excerpt=result.chunk.text[:600],
-                    )
-                    for result in results
-                )
         self.history_repository.add_message(history_id, MessageRole.USER, question)
         self.history_repository.add_message(
             history_id,
             MessageRole.ASSISTANT,
             answer,
-            sources = json.dumps([s.__dict__ for s in sources], ensure_ascii=False) if sources else None,
+            sources=json.dumps([s.__dict__ for s in sources], ensure_ascii=False) if sources else None,
         )
         self.history_repository.touch_history(history_id)
 
@@ -181,6 +387,8 @@ class RagService:
                 ],
                 "time_ms": round(generation_ms, 3),
             }
+            if citation_validation is not None:
+                trace["citation_validation"] = citation_validation
             trace["total_time_ms"] = round(
                 (time.perf_counter() - request_started) * 1000, 3
             )

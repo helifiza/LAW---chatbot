@@ -18,6 +18,8 @@ Ngoài việc trả lời câu hỏi, hãy sinh thêm một tiêu đề ngắn g
 Chỉ trả về JSON theo đúng định dạng sau, không thêm markdown, {"title": "...", "answer": "..."}
 """
 DEFAULT_TITLE = "Cuộc trò chuyện mới"
+
+
 class GenerationService:
     def __init__(
         self,
@@ -52,6 +54,7 @@ class GenerationService:
             temperature=self.temperature,
             max_output_tokens=self.max_tokens,
         )
+    
     def generate_title(
             self,
             question: str,
