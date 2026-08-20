@@ -374,10 +374,21 @@ class LegalChunkingService:
                         created_at=created_at,
                     )
                 )
+        for c in chunks:
+            self.logger.info("Chunk %s | tokens=%s", c.chunk_index, c.token_count)
+
+        avg_tokens = sum(c.token_count for c in chunks) / len(chunks) if chunks else 0
         self.logger.info(
-            "Chunking hoàn tất | history=%s document=%s chunks=%s",
+            "Chunking hoàn tất | history=%s document=%s chunks=%s | avg_tokens=%.1f",
             history_id,
             document_id,
             len(chunks),
+            avg_tokens,
         )
+#        self.logger.info(
+#            "Chunking hoàn tất | history=%s document=%s chunks=%s",
+#            history_id,
+#            document_id,
+#            len(chunks),
+#        )
         return chunks

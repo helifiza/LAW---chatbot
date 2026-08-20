@@ -18,6 +18,9 @@ from app.services.rag_service import RagService
 from app.services.reranking_service import CrossEncoderReranker
 from app.services.history_service import HistoryService
 from app.services.auth_service import AuthService
+from app.services.query_router_service import QueryRouterService
+from app.services.summary_service import SummarizeService 
+from app.services.query_router_service import QueryRouterService
 from app.repositories.user_repository import UserRepository
 
 
@@ -41,6 +44,8 @@ class AppContainer:
     indexing_service: IndexingService
     rag_service: RagService
     auth_service: AuthService
+    query_router_service: QueryRouterService
+    summarize_service: SummarizeService  
 
 
 def build_container(settings: Settings) -> AppContainer:
@@ -119,15 +124,25 @@ def build_container(settings: Settings) -> AppContainer:
         embeddings,
         get_logger("slaw.indexing"),
     )
+    query_router = QueryRouterService(gemini, settings.generation_model)
+    summarize = SummarizeService(
+        history_repo=histories,
+        vector_repo=vectors,
+        gemini_client=gemini,
+        model=settings.generation_model,
+    )
     rag = RagService(
-    history_service=history_service,
-    history_repository=histories,
-    query_rewrite_service=query_rewrite,
-    retrieval_service=retrieval,
-    generation_service=generation,
-    embedding_client=embeddings,
-    history_limit=settings.history_message_limit,
-)
+        history_service=history_service,
+        history_repository=histories,
+        query_rewrite_service=query_rewrite,
+        retrieval_service=retrieval,
+        generation_service=generation,
+        embedding_client=embeddings,
+        history_limit=settings.history_message_limit,
+        query_router_service= query_router,
+        vector_repository= vectors,
+        summarize_service=summarize,
+    )
     return AppContainer(
         settings=settings,
 
@@ -146,4 +161,6 @@ def build_container(settings: Settings) -> AppContainer:
         indexing_service=indexing,
         rag_service=rag,
         auth_service=auth,
+        query_router_service=query_router,   
+        summarize_service=summarize,
     )

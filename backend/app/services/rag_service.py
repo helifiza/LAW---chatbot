@@ -12,11 +12,13 @@ from typing import Sequence
 from app.core.errors import NoReadyDocumentError
 from app.domain.models import DocumentStatus, MessageRole, SearchResult
 from app.repositories.history_repository import HistoryRepository
+from app.repositories.vector_repository import VectorRepository
 from app.services.generation_service import GenerationService
 from app.services.hybrid_retrieval_service import HybridRetrievalService
 from app.services.query_rewrite_service import QueryRewriteService
 from app.services.history_service import HistoryService
-
+from app.services.query_router_service import QueryRouterService, QueryRoute
+from app.services.summary_service import SummarizeService
 
 try:
     from rapidfuzz import fuzz
@@ -99,6 +101,9 @@ class RagService:
         generation_service: GenerationService,
         embedding_client,          
         history_limit: int,
+        query_router_service: QueryRouterService,
+        vector_repository: VectorRepository,
+        summarize_service: SummarizeService,
     ) -> None:
         self.history_service = history_service
         self.history_repository = history_repository
@@ -107,6 +112,9 @@ class RagService:
         self.generation_service = generation_service
         self.embedding_client = embedding_client
         self.history_limit = history_limit
+        self.query_router_service = query_router_service
+        self.vector_repository = vector_repository
+        self.summarize_service = summarize_service
 
     # ------------------------------------------------------------------
     # Dedup / format context
@@ -292,34 +300,21 @@ class RagService:
     # ------------------------------------------------------------------
     # Main entrypoint
     # ------------------------------------------------------------------
-
-    def ask(
+    def _ask_specific(
         self,
         history_id: str,
         question: str,
         top_k: int,
-        include_trace: bool = False,
-    ) -> RagAnswer:
-        request_started = time.perf_counter()
-        self.history_service.require_active(history_id)
-        ready_count = self.history_repository.count_documents(
-            history_id, statuses=(DocumentStatus.READY.value,)
-        )
-        if ready_count == 0:
-            raise NoReadyDocumentError(
-                "Phiên chưa có tài liệu đã lập chỉ mục thành công"
-            )
+    )-> tuple[str, tuple[RagSource, ...], int, dict[str, object]]:
         history_records = self.history_repository.list_messages(
             history_id, limit=self.history_limit
         )
-        history = [
-            (message.role, message.content) for message in history_records
-        ]
-
+        history = [(message.role, message.content) for message in history_records]
+ 
         rewrite_started = time.perf_counter()
         rewrite = self.query_rewrite_service.rewrite(question, history)
         rewrite_ms = (time.perf_counter() - rewrite_started) * 1000
-
+ 
         retrieval = self.retrieval_service.retrieve(
             history_id=history_id,
             original_query=question,
@@ -341,7 +336,6 @@ class RagService:
         )
         generation_ms = 0.0
         citation_validation: dict[str, object] | None = None
-
         if results:
             generation_started = time.perf_counter()
             raw_answer = self.generation_service.generate(
@@ -352,12 +346,89 @@ class RagService:
             if citation_validation["has_valid_citation"]:
                 answer = raw_answer
             else:
-                # Coverage citation không đạt ngưỡng tin cậy -> nghi ngờ model
-                # bịa nguồn hoặc trả lời không dựa trên context.
                 answer = ANTI_HALLUCINATION_ANSWER
         else:
             answer = NOT_FOUND_ANSWER
+        branch_trace: dict[str, object] = dict(retrieval.trace)
+        warnings = list(branch_trace.get("warnings") or [])
+        if rewrite.warning:
+            warnings.insert(0, rewrite.warning)
+        branch_trace["warnings"] = warnings
+        branch_trace["rewrite"] = {
+            "strategy": "hyde" if rewrite.used_hyde else "original_query",
+            "used_hyde": rewrite.used_hyde,
+            "model": self.query_rewrite_service.model,
+            "time_ms": round(rewrite_ms, 3),
+        }
+        branch_trace["generation"] = {
+            "model": self.generation_service.model,
+            "context_element_ids": [result.chunk.element_id for result in results],
+            "time_ms": round(generation_ms, 3),
+        }
+        if citation_validation is not None:
+            branch_trace["citation_validation"] = citation_validation
+ 
+        return answer, sources, len(results), branch_trace
 
+    def _ask_summary(
+            self,
+            history_id: str,
+            question: str,
+    )-> tuple[str, tuple[RagSource, ...], int, dict[str, object]]:
+        summary_result = self.summarize_service.run(history_id, question)
+        raw_answer = summary_result.answer
+        sources = tuple(
+            RagSource(
+                document_id=h.document_id,
+                file_name=h.file_name,
+                page_number=h.page_number,
+                page_end_number=h.page_end_number,
+                dieu=h.dieu,
+                score=1.0,  # không có điểm similarity ở nhánh này — lấy full chunk theo document
+                excerpt=h.text[:600],
+            )
+            for h in summary_result.sources
+        )
+
+        citation_validation = self._validate_citations(raw_answer, sources)
+        if citation_validation["has_valid_citation"]:
+            answer = raw_answer
+        else:
+            answer = ANTI_HALLUCINATION_ANSWER
+ 
+        branch_trace: dict[str, object] = {
+            "summary_scope": summary_result.scope_document_ids,
+            "citation_validation": citation_validation,
+        }
+        return answer, sources, len(sources), branch_trace
+
+    def ask(
+        self,
+        history_id: str,
+        question: str,
+        top_k: int,
+        include_trace: bool = False,
+    ) -> RagAnswer:
+        request_started = time.perf_counter()
+        self.history_service.require_active(history_id)
+        ready_count = self.history_repository.count_documents(
+            history_id, statuses=(DocumentStatus.READY.value,)
+        )
+        if ready_count == 0:
+            raise NoReadyDocumentError(
+                "Phiên chưa có tài liệu đã lập chỉ mục thành công"
+            )
+        route_result = self.query_router_service.route(question)
+        if route_result.route == QueryRoute.SUMMARY:
+            answer, sources, retrieved_count, branch_trace = self._ask_summary(
+                history_id, question
+            )
+        else:
+            answer, sources, retrieved_count, branch_trace = self._ask_specific(
+                history_id, question, top_k
+            )
+ 
+        # Phần lưu lịch sử — DÙNG CHUNG cho cả 2 nhánh, không trùng lặp code
         self.history_repository.add_message(history_id, MessageRole.USER, question)
         self.history_repository.add_message(
             history_id,
@@ -366,30 +437,15 @@ class RagService:
             sources=json.dumps([s.__dict__ for s in sources], ensure_ascii=False) if sources else None,
         )
         self.history_repository.touch_history(history_id)
-
+ 
         trace: dict[str, object] | None = None
         if include_trace:
-            trace = dict(retrieval.trace)
-            warnings = list(trace.get("warnings") or [])
-            if rewrite.warning:
-                warnings.insert(0, rewrite.warning)
-            trace["warnings"] = warnings
-            trace["rewrite"] = {
-                "strategy": "hyde" if rewrite.used_hyde else "original_query",
-                "used_hyde": rewrite.used_hyde,
-                "model": self.query_rewrite_service.model,
-                "time_ms": round(rewrite_ms, 3),
-            }
-            trace["generation"] = {
-                "model": self.generation_service.model,
-                "context_element_ids": [
-                    result.chunk.element_id for result in results
-                ],
-                "time_ms": round(generation_ms, 3),
-            }
-            if citation_validation is not None:
-                trace["citation_validation"] = citation_validation
+            trace = branch_trace
+            trace["route"] = route_result.route.value
             trace["total_time_ms"] = round(
                 (time.perf_counter() - request_started) * 1000, 3
             )
-        return RagAnswer(question, answer, sources, len(results), trace)
+ 
+        return RagAnswer(question, answer, sources, retrieved_count, trace)
+ 
+        

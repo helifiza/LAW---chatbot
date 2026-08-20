@@ -183,6 +183,38 @@ class VectorRepository:
             chunks.append(self._chunk_from_result(element_id, text, metadata))
         return chunks
 
+    def list_chunks_by_documents(
+        self,
+        history_id: str,
+        document_ids: Sequence[str],
+    ) -> list[ChunkDetail]:
+        if not document_ids:
+            return []
+        where = {
+            "$and": [
+                {"history_id": history_id},
+                {"document_id": {"$in": list(document_ids)}},
+            ]
+        }
+        with self._lock:
+            result = self._collection.get(
+                where=where,
+                include=["documents", "metadatas"],
+            )
+        ids = result.get("ids") or []
+        documents = result.get("documents") or []
+        metadatas = result.get("metadatas") or []
+        chunks: list[ChunkDetail] = []
+        for element_id, text, metadata in zip(ids, documents, metadatas):
+            if text is None or metadata is None:
+                continue
+            chunks.append(self._chunk_from_result(element_id, text, metadata))
+        # Sắp theo document_id rồi chunk_index để giữ đúng thứ tự văn bản gốc
+        # trong từng document — quan trọng cho bước dedupe theo `dieu` và Map
+        # ở SummarizeService (cần đọc các chunk liền kề theo đúng trình tự).
+        chunks.sort(key=lambda c: (c.document_id, c.chunk_index))
+        return chunks
+
     def delete_document(self, history_id: str, document_id: str) -> None:
         with self._lock:
             self._collection.delete(
