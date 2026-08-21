@@ -256,9 +256,7 @@ class SummarizeService:
         except (json.JSONDecodeError, AttributeError):
             return []
 
-    # ------------------------------------------------------------------
     # Bước 5: Reduce — tổng hợp thành bản tóm tắt cuối
-    # ------------------------------------------------------------------
 
     def _format_highlights_for_reduce(
         self, highlights: Sequence[SummaryHighlight]

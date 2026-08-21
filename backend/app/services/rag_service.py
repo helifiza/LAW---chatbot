@@ -44,9 +44,20 @@ ANTI_HALLUCINATION_ANSWER = (
 # Chỉ giữ MỘT định nghĩa duy nhất cho các hằng số citation (bản trước có 2 lần
 # định nghĩa CITATION_PATTERN, lần sau đè mất lần trước và làm mất regex nới
 # rộng hỗ trợ "tr." / dấu gạch en-dash).
+#
+# Pattern hỗ trợ 2 định dạng citation:
+#   - Theo trang:  [tên tài liệu, trang X]  hoặc  [tên tài liệu, trang X-Y]
+#   - Theo Điều:   [tên tài liệu, Điều Z]   (chấp nhận cả "Dieu" không dấu)
+# Dùng named groups (file/p1/p2/dieu) để phân biệt rõ 2 nhánh khi xử lý ở
+# _validate_citations, tránh nhầm lẫn group theo thứ tự.
 CITATION_PATTERN = re.compile(
-    r"\[([^\[\],]+),\s*(?:trang|tr\.?)\s*(\d+)\s*(?:[-–]\s*(\d+))?\]"
-)#dùng để tìm citiation dạng [tên tài liệu, trang X-Y]
+    r"\[(?P<file>[^\[\],]+),\s*"
+    r"(?:"
+    r"(?:trang|tr\.?)\s*(?P<p1>\d+)\s*(?:[-–]\s*(?P<p2>\d+))?"
+    r"|"
+    r"(?:[Đđ]i[eề]u|[Dd]ieu)\s*(?P<dieu>\d+[A-Za-z]?)"
+    r")\]"
+)
 CITATION_MATCH_THRESHOLD = 0.70          # ngưỡng khớp tên file (string/token)
 CITATION_COVERAGE_THRESHOLD = 0.80       # % citation hợp lệ / tổng citation
 SEMANTIC_Z_THRESHOLD = 1.0               # claim phải "nổi bật" >= 1 std so với các nguồn khác
@@ -60,6 +71,21 @@ def _normalize_filename(name: str) -> str:
     name = re.sub(r"[_\-\.]+", " ", name)
     name = re.sub(r"\s+", " ", name).strip()
     return name
+
+
+#hàm chuẩn hóa giá trị Điều để so sánh trực tiếp giữa citation trong answer
+#(vd "Điều 05", "Dieu 5", "điều 5a") và field `dieu` của RagSource, đưa về
+#cùng 1 dạng số (+ hậu tố chữ nếu có), ví dụ "Điều 05" và "Dieu 5" đều thành "5".
+def _normalize_dieu(value: str | None) -> str | None:
+    if not value:
+        return None
+    match = re.search(r"(\d+)\s*([A-Za-z]?)", value)
+    if not match:
+        return None
+    number = match.group(1).lstrip("0") or "0"
+    suffix = match.group(2).lower()
+    return f"{number}{suffix}"
+
 
 #hàm tính cosine similarity, để đo độ tương đồng giữa 2 vector a và b, cosine càng gần 1 thì càng có độ tương đồng cao
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
@@ -218,11 +244,22 @@ class RagService:
         self, answer: str, sources: Sequence[RagSource]
     ) -> dict[str, object]:
         """
-        Trích các citation dạng [file, trang X] trong answer, so khớp MỜ
-        (token-based, sau chuẩn hoá tên file) với tên file trong sources, rồi
-        xác thực thêm bằng semantic z-score giữa câu chứa citation và excerpt
-        của nguồn khớp nhất. Câu trả lời chỉ được chấp nhận nếu tỷ lệ citation
-        hợp lệ (matched / total) >= CITATION_COVERAGE_THRESHOLD.
+        Trích các citation dạng [file, trang X-Y] hoặc [file, Điều Z] trong
+        answer, so khớp MỜ (token-based, sau chuẩn hoá tên file) với tên file
+        trong sources.
+
+        - Citation dạng "trang": đối chiếu bằng overlap khoảng trang
+          (page_number/page_end_number của source).
+        - Citation dạng "Điều": đối chiếu trực tiếp field `dieu` của source
+          (sau khi chuẩn hoá qua _normalize_dieu), không dùng page_overlap.
+
+        Sau bước khớp tên/vị trí, xác thực thêm bằng semantic z-score giữa
+        câu chứa citation và excerpt của nguồn khớp nhất. Câu trả lời chỉ
+        được chấp nhận nếu tỷ lệ citation hợp lệ (matched / total) >=
+        CITATION_COVERAGE_THRESHOLD. Logic này dùng chung cho cả nhánh
+        SPECIFIC (_ask_specific, chỉ phát sinh citation dạng trang) và nhánh
+        SUMMARY (_ask_summary, có thể phát sinh cả 2 dạng) — không cần đổi gì
+        ở 2 hàm gọi vì chúng chỉ truyền answer/sources vào đây.
         """
         matched: list[dict[str, object]] = []
         unmatched: list[dict[str, object]] = []
@@ -232,26 +269,47 @@ class RagService:
             excerpt_vecs = self._embed_excerpts(sources)
 
         for match in CITATION_PATTERN.finditer(answer):
-            file_cited, p1_str, p2_str = match.group(1), match.group(2), match.group(3)
-            p1 = int(p1_str)
-            p2 = int(p2_str) if p2_str else p1
+            file_cited = match.group("file")
+            p1_str, p2_str = match.group("p1"), match.group("p2")
+            dieu_str = match.group("dieu")
+            is_dieu_citation = dieu_str is not None
 
-            # Check Bước 1: khớp tên file / trang (string)
+            if is_dieu_citation:
+                cited_dieu_norm = _normalize_dieu(dieu_str)
+                p1 = p2 = None
+            else:
+                p1 = int(p1_str)
+                p2 = int(p2_str) if p2_str else p1
+                cited_dieu_norm = None
+
+            # Check Bước 1: khớp tên file + vị trí (trang hoặc Điều tuỳ loại citation)
             best_name_score = 0.0
             best_source_idx: int | None = None
             for idx, source in enumerate(sources):
                 name_score = self._similarity(file_cited, source.file_name)
-                page_overlap = not (p2 < source.page_number or p1 > source.page_end_number)
-                # Trang không khớp -> phạt điểm similarity một nửa, coi như
+                if is_dieu_citation:
+                    # So trực tiếp field dieu của source, KHÔNG dùng page_overlap.
+                    location_ok = (
+                        cited_dieu_norm is not None
+                        and _normalize_dieu(source.dieu) == cited_dieu_norm
+                    )
+                else:
+                    location_ok = not (p2 < source.page_number or p1 > source.page_end_number)
+                # Vị trí không khớp -> phạt điểm similarity một nửa, coi như
                 # citation trỏ sai vị trí dù tên file đúng.
-                effective_score = name_score if page_overlap else name_score * 0.5
+                effective_score = name_score if location_ok else name_score * 0.5
                 if effective_score > best_name_score:
                     best_name_score = effective_score
                     best_source_idx = idx
 
             entry: dict[str, object] = {
                 "cited_file": file_cited.strip(),
-                "cited_page": f"{p1}-{p2}" if p2 != p1 else str(p1),
+                "citation_type": "dieu" if is_dieu_citation else "trang",
+                "cited_location": (
+                    f"Điều {dieu_str.strip()}"
+                    if is_dieu_citation
+                    else (f"{p1}-{p2}" if p2 != p1 else str(p1))
+                ),
                 "match_score": round(best_name_score, 4),
                 "matched_file": sources[best_source_idx].file_name if best_source_idx is not None else None,
                 "semantic_score": None,
@@ -261,7 +319,7 @@ class RagService:
 
             name_page_ok = best_name_score >= CITATION_MATCH_THRESHOLD #nếu bước 1 độ chính xác >70% thì coi như đạt yêu câu bước 1
 
-            # Check Bước 2: chỉ chạy semantic check nếu name/page đã khớp
+            # Check Bước 2: chỉ chạy semantic check nếu name/vị trí đã khớp
             if name_page_ok and best_source_idx is not None and excerpt_vecs is not None:
                 claim = self._extract_claim_sentence(answer, match.start())
                 # RETRIEVAL_QUERY vì claim đang đóng vai trò "truy vấn" xem
@@ -447,5 +505,3 @@ class RagService:
             )
  
         return RagAnswer(question, answer, sources, retrieved_count, trace)
- 
-        

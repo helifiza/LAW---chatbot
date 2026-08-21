@@ -122,7 +122,12 @@ class RagServiceTestBase(unittest.TestCase):
             encoding="utf-8",
         )
         self.document = self.indexing.index_file(
-            self.history.id, upload, "hop_dong.txt", "text/plain", upload.stat().st_size
+            self.history.id,
+            "test-user",           # user_id
+            upload,                 # temp_path
+            "hop_dong.txt",          # original_file_name
+            "text/plain",            # mime_type
+            upload.stat().st_size,   # size_bytes
         )
         self.assertEqual(self.document.status, "ready")
 
