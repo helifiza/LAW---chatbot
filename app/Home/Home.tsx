@@ -8,6 +8,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
+import { useRouter } from "next/navigation";
 import "./Chat.css";
 import styles from "./Home.module.css";
 import {
@@ -18,6 +19,7 @@ import {
   createHistory,
   deleteHistoryDocument,
   getHistory,
+  logout,
   uploadHistoryDocuments,
   listHistories,
   type HistorySummary,
@@ -234,6 +236,7 @@ async function restoreOrCreateHistory(): Promise<HistorySnapshot | null> {
 }
 
 export default function Home() {
+  const router = useRouter();
   const [view, setView] = useState<"chat" | "history">("chat");
   const [historyList, setHistoryList] = useState<HistorySummary[]>([]);
   const [isHistoryListLoading, setIsHistoryListLoading] = useState(false);
@@ -250,6 +253,8 @@ export default function Home() {
   const [isDragging, setIsDragging] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
+  const [showLogout, setShowLogout] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
   const initializationRef = useRef<Promise<HistorySnapshot | null> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -475,6 +480,22 @@ export default function Home() {
       );
     } finally {
       setIsHistoryLoading(false);
+    }
+  }
+
+  async function handleLogout() {
+    if (isLoggingOut) return;
+    setIsLoggingOut(true);
+    try {
+      await logout();
+    } catch {
+      /* backend logout có thể lỗi, vẫn tiếp tục đăng xuất phía client */
+    } finally {
+      window.localStorage.removeItem("slaw.user");
+      window.localStorage.removeItem(HISTORY_STORAGE_KEY);
+      setIsLoggingOut(false);
+      setShowLogout(false);
+      router.push("/");
     }
   }
 
@@ -729,16 +750,33 @@ export default function Home() {
               )}
             </div>
           </div>
-          <div className={styles.profile}>
-            <span className={styles.profileIcon}>
-              <Icon name="user" size={19} />
-            </span>
-            <span>
-              <strong>{userId ?? "Phiên cục bộ"}</strong>
-              <small>
-                {historyId ? `Phiên ${historyId.slice(0, 8)}` : "Đang kết nối"}
-              </small>
-            </span>
+          <div className={styles.profileWrap}>
+            <button
+              type = "button"
+              className = {styles.profile}
+              onClick = {() => setShowLogout((value) => !value)}
+              aria-expanded = {showLogout}
+              >
+                <span className={styles.profileIcon}>
+                  <Icon name="user" size={19} />
+                </span>
+                <span>
+                  <strong>{userId ?? "Phiên cục bộ"}</strong>
+                  <small>
+                    {historyId ? `Phiên ${historyId.slice(0, 8)}` : "Đang kết nối"}
+                  </small>
+                </span>
+            </button>
+            {showLogout && (
+              <button
+                type = "button"
+                className={styles.logoutButton}
+                onClick={() => void handleLogout()}
+                disabled = {isLoggingOut}
+              >
+                {isLoggingOut ? "Đang đăng xuất...": "Đăng xuất"}
+              </button>
+            )}
           </div>
         </aside>
         {sidebarOpen && (

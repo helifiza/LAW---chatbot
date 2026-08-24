@@ -131,6 +131,10 @@ export async function login(
   );
 }
 
+export async function logout(): Promise<void> {
+  await request<null>("/auth/logout", { method: "POST" });
+}
+
 export function createHistory(question?: string): Promise<HistoryInfo> {
   const body = question ? JSON.stringify({ question }) : undefined;
   return request<HistoryInfo>("/histories", {
