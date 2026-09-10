@@ -19,18 +19,33 @@ import {
   createHistory,
   deleteHistoryDocument,
   getHistory,
+  getLegalGraph,
   logout,
   uploadHistoryDocuments,
   listHistories,
   type HistorySummary,
   type ApiDocument,
   type HistorySnapshot,
+  type LegalGraphDocument,
 } from "./api";
 
 const MAX_FILES = 5;
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
-const ALLOWED_EXTENSIONS = ["pdf", "docx", "txt", "md", "csv", "json"];
+const ALLOWED_EXTENSIONS = ["pdf"];
 const HISTORY_STORAGE_KEY = "slaw.rag.history_id";
+
+function storedUserId(): string | null {
+  if (typeof window === "undefined") return null;
+  const stored = window.localStorage.getItem("slaw.user");
+  if (!stored) return null;
+  try {
+    const user = JSON.parse(stored) as { id?: string };
+    return user.id ?? null;
+  } catch {
+    window.localStorage.removeItem("slaw.user");
+    return null;
+  }
+}
 
 type MessageSource = { fileName: string; locator: string; excerpt: string };
 type Message = {
@@ -186,7 +201,11 @@ function formatFileSize(bytes: number) {
 function documentStatus(document: ApiDocument) {
   if (document.status === "processing") return "Đang lập chỉ mục";
   if (document.status === "failed") return "Lỗi lập chỉ mục";
-  return `${document.chunk_count} đoạn đã index`;
+  if (document.graph_status === "processing" || document.graph_status === "pending") {
+    return `${document.chunk_count} đoạn đã index · đang dựng graph`;
+  }
+  if (document.graph_status === "failed") return `${document.chunk_count} đoạn đã index · graph lỗi`;
+  return `${document.chunk_count} đoạn đã index · graph ${document.graph_status}`;
 }
 function messagesFromSnapshot(snapshot: HistorySnapshot): Message[] {
   return [
@@ -243,6 +262,7 @@ export default function Home() {
   const [historySearch, setHistorySearch] = useState("");
   const [historyId, setHistoryId] = useState<string | null>(null);
   const [documents, setDocuments] = useState<ApiDocument[]>([]);
+  const [legalDocuments, setLegalDocuments] = useState<LegalGraphDocument[]>([]);
   const [pendingIds, setPendingIds] = useState<string[]>([]);
   const [messages, setMessages] = useState<Message[]>(INITIAL_MESSAGES);
   const [draft, setDraft] = useState("");
@@ -252,7 +272,7 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [userId, setUserId] = useState<string | null>(null);
+  const [userId] = useState<string | null>(storedUserId);
   const [showLogout, setShowLogout] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const initializationRef = useRef<Promise<HistorySnapshot | null> | null>(null);
@@ -279,20 +299,14 @@ export default function Home() {
         .map((item) => item.file_name),
     [documents, pendingIds],
   );
-
-  useEffect(() => {
-    const storedUser = window.localStorage.getItem("slaw.user");
-    if (storedUser) {
-      try {
-        const user = JSON.parse(storedUser) as { id?: string };
-        if (user?.id) {
-          setUserId(user.id);
-        }
-      } catch {
-        window.localStorage.removeItem("slaw.user");
-      }
-    }
-  }, []);
+  const legalDocumentByUploadId = useMemo(
+    () => new Map(
+      legalDocuments
+        .filter((item) => item.upload_document_id)
+        .map((item) => [item.upload_document_id as string, item]),
+    ),
+    [legalDocuments],
+  );
 
   useEffect(() => {
     let active = true;
@@ -329,6 +343,28 @@ export default function Home() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, isLoading]);
+
+  useEffect(() => {
+    if (!historyId || !documents.some((item) => item.status === "processing")) return;
+    const timer = window.setInterval(() => {
+      void getHistory(historyId).then((snapshot) => {
+        setDocuments(snapshot.documents);
+        if (!snapshot.documents.some((item) => item.status === "processing")) {
+          window.clearInterval(timer);
+        }
+      }).catch(() => undefined);
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [historyId, documents]);
+
+  useEffect(() => {
+    if (!historyId || !documents.some((item) => item.status === "ready")) {
+      return;
+    }
+    void getLegalGraph(historyId)
+      .then((graph) => setLegalDocuments(graph.documents))
+      .catch(() => setLegalDocuments([]));
+  }, [historyId, documents]);
   useEffect(() => {
     if (!textareaRef.current) return;
     textareaRef.current.style.height = "0px";
@@ -398,7 +434,7 @@ export default function Home() {
       setPendingIds((current) => [
         ...current,
         ...result.documents
-          .filter((item) => !oldIds.has(item.id) && item.status === "ready")
+          .filter((item) => !oldIds.has(item.id) && item.status === "processing")
           .map((item) => item.id),
       ]);
       const allErrors = [
@@ -715,7 +751,7 @@ export default function Home() {
               <strong>
                 {isUploading ? "Đang xử lý tài liệu…" : "Thêm tài liệu"}
               </strong>
-              <small>PDF, DOCX, TXT, MD, CSV, JSON</small>
+              <small>PDF</small>
             </button>
             <div className={styles.fileList}>
               {documents.map((document) => (
@@ -734,6 +770,14 @@ export default function Home() {
                       {formatFileSize(document.size_bytes)} ·{" "}
                       {documentStatus(document)}
                     </small>
+                    {legalDocumentByUploadId.get(document.id) && (
+                      <small>
+                        {legalDocumentByUploadId.get(document.id)?.document_number || "Chưa rõ số hiệu"}
+                        {legalDocumentByUploadId.get(document.id)?.primary_linh_vuc_code
+                          ? ` · Lĩnh vực ${legalDocumentByUploadId.get(document.id)?.primary_linh_vuc_code}`
+                          : ""}
+                      </small>
+                    )}
                   </span>
                   <button
                     type="button"

@@ -20,8 +20,11 @@ from app.services.history_service import HistoryService
 from app.services.auth_service import AuthService
 from app.services.query_router_service import QueryRouterService
 from app.services.summary_service import SummarizeService 
-from app.services.query_router_service import QueryRouterService
+from app.services.classification import LinhVucClassificationService
 from app.repositories.user_repository import UserRepository
+from app.repositories.legal_graph_repository import LegalGraphRepository
+from app.services.legal_graph_service import LegalGraphService
+from app.services.legal_effect_service import LegalEffectService
 
 
 
@@ -32,6 +35,7 @@ class AppContainer:
     history_repository: HistoryRepository
     user_repository: UserRepository
     vector_repository: VectorRepository
+    legal_graph_repository: LegalGraphRepository
 
     gemini_client: GeminiClient
 
@@ -46,12 +50,15 @@ class AppContainer:
     auth_service: AuthService
     query_router_service: QueryRouterService
     summarize_service: SummarizeService  
+    linh_vuc_classification_service: LinhVucClassificationService
+    legal_graph_service: LegalGraphService
 
 
 def build_container(settings: Settings) -> AppContainer:
     histories = HistoryRepository(settings.sqlite_path)
 
     users = UserRepository(settings.sqlite_path)
+    legal_graphs = LegalGraphRepository(settings.sqlite_path)
 
     auth = AuthService(
         user_repository=users,
@@ -65,6 +72,12 @@ def build_container(settings: Settings) -> AppContainer:
         settings.embedding_provider,
         settings.embedding_dimension,
     )
+    for assignment in legal_graphs.list_document_type_assignments():
+        vectors.update_document_metadata(
+            str(assignment["history_id"]),
+            str(assignment["upload_document_id"]),
+            document_type=assignment.get("document_type"),
+        )
     gemini = GeminiClient(
         settings.gemini_api_key,
         settings.gemini_retry_count,
@@ -110,7 +123,19 @@ def build_container(settings: Settings) -> AppContainer:
         histories,
         vectors,
         get_logger("slaw.history"),
+        max_documents=settings.max_history_documents,
     )
+    linh_vuc_classification = LinhVucClassificationService(
+        gemini,
+        settings.generation_model,
+    )
+    legal_graph = LegalGraphService(
+        legal_graphs,
+        gemini,
+        settings.generation_model,
+        get_logger("slaw.legal_graph"),
+    )
+    legal_effect = LegalEffectService(legal_graphs, histories)
     indexing = IndexingService(
         history_service,
         histories,
@@ -123,6 +148,8 @@ def build_container(settings: Settings) -> AppContainer:
         ),
         embeddings,
         get_logger("slaw.indexing"),
+        linh_vuc_classification_service=linh_vuc_classification,
+        legal_graph_service=legal_graph,
     )
     query_router = QueryRouterService(gemini, settings.generation_model)
     summarize = SummarizeService(
@@ -130,6 +157,7 @@ def build_container(settings: Settings) -> AppContainer:
         vector_repo=vectors,
         gemini_client=gemini,
         model=settings.generation_model,
+        legal_graph_repo=legal_graphs,
     )
     rag = RagService(
         history_service=history_service,
@@ -142,6 +170,8 @@ def build_container(settings: Settings) -> AppContainer:
         query_router_service= query_router,
         vector_repository= vectors,
         summarize_service=summarize,
+        legal_graph_repository=legal_graphs,
+        legal_effect_service=legal_effect,
     )
     return AppContainer(
         settings=settings,
@@ -149,6 +179,7 @@ def build_container(settings: Settings) -> AppContainer:
         history_repository=histories,
         user_repository=users,
         vector_repository=vectors,
+        legal_graph_repository=legal_graphs,
 
         gemini_client=gemini,
 
@@ -163,4 +194,6 @@ def build_container(settings: Settings) -> AppContainer:
         auth_service=auth,
         query_router_service=query_router,   
         summarize_service=summarize,
+        linh_vuc_classification_service=linh_vuc_classification,
+        legal_graph_service=legal_graph,
     )

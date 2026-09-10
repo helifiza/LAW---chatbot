@@ -1,9 +1,10 @@
 import tempfile
 import unittest
-from datetime import timedelta
 from pathlib import Path
 
+from app.core.errors import DocumentLimitError, HistoryNotFoundError
 from app.repositories.history_repository import HistoryRepository
+from app.repositories.user_repository import UserRepository
 from app.services.history_service import HistoryService
 
 
@@ -19,40 +20,27 @@ class FakeVectorRepository:
 
 
 class HistoryServiceTests(unittest.TestCase):
-    def test_cleanup_removes_expired_sqlite_and_vector_state(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            repository = HistoryRepository(Path(directory) / "state.db")
-            vectors = FakeVectorRepository()
-            service = HistoryService(repository, vectors, 1, 5)
-            history = service.create()
-            removed = service.cleanup_expired(history.expires_at + timedelta(seconds=1))
-            self.assertEqual(removed, 1)
-            self.assertIsNone(repository.get_history(history.id))
-            self.assertEqual(vectors.deleted_histories, [history.id])
+    def setUp(self) -> None:
+        self.temp_directory = tempfile.TemporaryDirectory()
+        database = Path(self.temp_directory.name) / "state.db"
+        self.user = UserRepository(database).create_user("Test", "test@example.com", "hash")
+        self.repository = HistoryRepository(database)
+        self.vectors = FakeVectorRepository()
 
-    def test_create_uses_default_values_when_not_provided(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            repository = HistoryRepository(Path(directory) / "state.db")
-            vectors = FakeVectorRepository()
-            service = HistoryService(repository, vectors, 1, 5)
+    def tearDown(self) -> None:
+        self.temp_directory.cleanup()
 
-            history = service.create()
+    def test_missing_history_raises_domain_error(self) -> None:
+        service = HistoryService(self.repository, self.vectors)
+        with self.assertRaises(HistoryNotFoundError):
+            service.require_active("missing")
 
-            self.assertEqual(history.user_id, "local")
-            self.assertEqual(history.title, "Cuộc trò chuyện mới")
-
-    def test_list_by_user_returns_latest_first(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            repository = HistoryRepository(Path(directory) / "state.db")
-            vectors = FakeVectorRepository()
-            service = HistoryService(repository, vectors, 1, 5)
-
-            first = service.create("user-1", "Đầu tiên")
-            second = service.create("user-1", "Thứ hai")
-
-            histories = service.list_by_user("user-1")
-
-            self.assertEqual([item.id for item in histories], [second.id, first.id])
+    def test_document_limit_is_enforced_in_backend(self) -> None:
+        service = HistoryService(self.repository, self.vectors, max_documents=1)
+        history = service.create(self.user["id"], "Test")
+        service.start_document(history.id, "one.pdf", "application/pdf", 10)
+        with self.assertRaises(DocumentLimitError):
+            service.start_document(history.id, "two.pdf", "application/pdf", 10)
 
 
 if __name__ == "__main__":

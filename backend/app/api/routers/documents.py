@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Response, UploadFile, status
 
 from app.api.dependencies import get_container, get_current_user
 from app.api.schemas import DocumentOut, UploadErrorOut, UploadResponse
@@ -13,6 +13,25 @@ from app.services.document_parser import SUPPORTED_EXTENSIONS
 
 
 router = APIRouter(prefix="/histories/{history_id}/documents", tags=["documents"])
+
+
+def _index_in_background(
+    container: AppContainer,
+    history_id: str,
+    user_id: str,
+    temporary_path: Path,
+    file_name: str,
+    mime_type: str,
+    size_bytes: int,
+    document,
+) -> None:
+    try:
+        container.indexing_service.index_file(
+            history_id, user_id, temporary_path, file_name, mime_type,
+            size_bytes, document=document,
+        )
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _safe_file_name(value: str | None) -> str:
@@ -62,6 +81,7 @@ def _save_temporary_upload(
 @router.post("", response_model=UploadResponse)
 def upload_documents(
     history_id: str,
+    background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
     user_id: str = Depends(get_current_user),
     container: AppContainer = Depends(get_container),
@@ -80,14 +100,16 @@ def upload_documents(
             temporary_path, file_name, size_bytes = _save_temporary_upload(
                 upload, container
             )
-            container.indexing_service.index_file(
-                history_id,
-                user_id,
-                temporary_path,
-                file_name,
-                upload.content_type or "application/octet-stream",
-                size_bytes,
+            mime_type = upload.content_type or "application/octet-stream"
+            document = container.history_service.start_document(
+                history_id, file_name, mime_type, size_bytes
             )
+            background_tasks.add_task(
+                _index_in_background,
+                container, history_id, user_id, temporary_path, file_name,
+                mime_type, size_bytes, document,
+            )
+            temporary_path = None
         except AppError as exc:
             errors.append(UploadErrorOut(file_name=display_name, message=exc.message))
         finally:

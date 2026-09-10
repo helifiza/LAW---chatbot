@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 import logging
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routers import auth, chat, documents, health, histories
+from app.api.routers import auth, chat, documents, health, histories, legal_graph
 from app.container import AppContainer, build_container
 from app.core.config import Settings
 from app.core.errors import AppError
-from app.core.errors import HistoryArchivedError
 from app.core.logging import configure_logging
 
 
@@ -26,10 +25,12 @@ logger = logging.getLogger("slaw.api")
 async def lifespan(app: FastAPI):
     container = build_container(settings)
     app.state.container = container
+
     try:
         yield
     finally:
         container.gemini_client.close()
+        container.vector_repository.close()
         logger.info("SLaw API dừng")
 
 
@@ -49,8 +50,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=list(settings.cors_origins),
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
@@ -92,6 +93,7 @@ app.include_router(health.router, prefix=settings.api_prefix)
 app.include_router(histories.router, prefix=settings.api_prefix)
 app.include_router(documents.router, prefix=settings.api_prefix)
 app.include_router(chat.router, prefix=settings.api_prefix)
+app.include_router(legal_graph.router, prefix=settings.api_prefix)
 
 
 @app.get("/", include_in_schema=False)
@@ -101,10 +103,3 @@ def root() -> dict[str, str]:
         "docs": "/docs",
         "health": f"{settings.api_prefix}/health",
     }
-
-@app.exception_handler(HistoryArchivedError)
-def handle_history_archived(request, exc: HistoryArchivedError):
-    return JSONResponse(
-        status_code = 409,
-        content = {"error": {"message": str(exc), "code": " HISTORY_ARCHIVED"}},
-    )

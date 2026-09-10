@@ -57,6 +57,8 @@ class DocumentOut(BaseModel):
     chunk_count: int
     error_message: str | None
     created_at: datetime
+    graph_status: str
+    graph_error: str | None
 
     @classmethod
     def from_record(cls, value: DocumentRecord) -> "DocumentOut":
@@ -69,6 +71,8 @@ class DocumentOut(BaseModel):
             chunk_count=value.chunk_count,
             error_message=value.error_message,
             created_at=value.created_at,
+            graph_status=value.graph_status,
+            graph_error=value.graph_error,
         )
 
 class SourceOut(BaseModel):

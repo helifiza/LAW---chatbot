@@ -10,6 +10,7 @@ from rank_bm25 import BM25Okapi
 
 from app.core.errors import RerankerServiceError
 from app.domain.models import ChunkDetail, SearchResult
+from app.domain.legal_document import normalize_document_type_filter
 from app.repositories.vector_repository import VectorRepository
 from app.services.embedding_service import EmbeddingService
 from app.services.reranking_service import CrossEncoderReranker
@@ -116,6 +117,9 @@ class HybridRetrievalService:
         original_query: str,
         dense_query: str,
         top_k: int,
+        document_ids: Sequence[str] | None = None,
+        linh_vuc_filter: Sequence[str] | None = None,
+        document_type_filter: Sequence[str] | None = None,
     ) -> RetrievalOutcome:
         started = time.perf_counter()
         warnings: list[str] = []
@@ -125,15 +129,28 @@ class HybridRetrievalService:
         dense_results = [
             result
             for result in self.vector_repository.query(
-                history_id, query_embedding, self.candidate_k
+                history_id,
+                query_embedding,
+                self.candidate_k,
+                document_ids=document_ids,
+                linh_vuc_filter=linh_vuc_filter,
+                document_type_filter=document_type_filter,
             )
             if result.score >= self.min_dense_similarity
         ]
         dense_ms = (time.perf_counter() - dense_started) * 1000
 
         bm25_started = time.perf_counter()
-        chunks = self.vector_repository.list_chunks(history_id)
-        # Giữ câu hỏi gốc cho BM25 để không làm loãng từ khóa pháp lý chính xác.
+        if document_ids:
+            chunks = self.vector_repository.list_chunks_by_documents(history_id, document_ids)
+        else:
+            chunks = self.vector_repository.list_chunks(history_id)
+        if linh_vuc_filter:
+            allowed = set(linh_vuc_filter)
+            chunks = [c for c in chunks if c.linh_vuc in allowed]
+        normalized_types = set(normalize_document_type_filter(document_type_filter))
+        if normalized_types:
+            chunks = [c for c in chunks if c.document_type in normalized_types]
         bm25_results = self._bm25(chunks, original_query)
         bm25_ms = (time.perf_counter() - bm25_started) * 1000
 
@@ -200,6 +217,8 @@ class HybridRetrievalService:
                 "bm25": original_query,
                 "rerank": original_query,
             },
+            "linh_vuc_filter": list(linh_vuc_filter) if linh_vuc_filter else None,
+            "document_type_filter": sorted(normalized_types) if normalized_types else None,
             "candidate_counts": {
                 "session_chunks": len(chunks),
                 "dense": len(dense_results),
@@ -227,3 +246,24 @@ class HybridRetrievalService:
             len(ranked),
         )
         return RetrievalOutcome(tuple(ranked), trace)
+
+    def retrieve_per_document(
+        self,
+        history_id: str,
+        document_ids: Sequence[str],
+        original_query: str,
+        dense_query: str,
+        k_per_doc: int,
+        document_type_filter: Sequence[str] | None = None,
+    ) -> dict[str, RetrievalOutcome]:
+        return {
+            doc_id: self.retrieve(
+                history_id=history_id,
+                original_query=original_query,
+                dense_query=dense_query,
+                top_k=k_per_doc,
+                document_ids=[doc_id],
+                document_type_filter=document_type_filter,
+            )
+            for doc_id in document_ids
+        }

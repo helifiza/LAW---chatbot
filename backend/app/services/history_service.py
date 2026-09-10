@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 
 from app.core.errors import (
     DocumentLimitError,
@@ -16,7 +15,6 @@ from app.domain.models import (
     MessageRole,
     HistoryRecord,
     HistoryStatus,
-    utc_now,
 )
 from app.repositories.history_repository import HistoryRepository
 from app.repositories.vector_repository import VectorRepository
@@ -28,10 +26,13 @@ class HistoryService:
         repository: HistoryRepository,
         vector_repository: VectorRepository,
         logger: logging.Logger | None = None,
+        *,
+        max_documents: int = 5,
     ) -> None:
         self.repository = repository
         self.vector_repository = vector_repository
         self.logger = logger or logging.getLogger(__name__)
+        self.max_documents = max_documents
 
     def create(self,
                user_id: str,
@@ -49,7 +50,7 @@ class HistoryService:
         return history
 
     def require_active(self, history_id: str) -> HistoryRecord:
-        history = self.repository.get_history(history_id)
+        history = self.get_any(history_id)
         if history.status == HistoryStatus.ARCHIVED:
             raise HistoryArchivedError("Lịch sử đã được lưu trữ, vui lòng mở lại trước khi tiếp tục")
         return history
@@ -89,9 +90,19 @@ class HistoryService:
         size_bytes: int,
     ) -> DocumentRecord:
         self.require_active(history_id)
-        return self.repository.create_document(
+        active_documents = self.repository.count_documents(
+            history_id,
+            statuses=(DocumentStatus.PROCESSING.value, DocumentStatus.READY.value),
+        )
+        if active_documents >= self.max_documents:
+            raise DocumentLimitError(
+                f"Mỗi lịch sử chỉ được tải tối đa {self.max_documents} tài liệu"
+            )
+        document = self.repository.create_document(
             history_id, file_name, mime_type, size_bytes
         )
+        self.repository.touch_history(history_id)
+        return document
 
     def list_documents(self, history_id: str) -> list[DocumentRecord]:
         self.get_any(history_id)

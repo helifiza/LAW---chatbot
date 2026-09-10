@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import time
 import json
-import statistics
+import inspect
 import unicodedata
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -13,12 +13,15 @@ from app.core.errors import NoReadyDocumentError
 from app.domain.models import DocumentStatus, MessageRole, SearchResult
 from app.repositories.history_repository import HistoryRepository
 from app.repositories.vector_repository import VectorRepository
-from app.services.generation_service import GenerationService
+from app.services.generation_service import GenerationService, GroundedClaim
 from app.services.hybrid_retrieval_service import HybridRetrievalService
 from app.services.query_rewrite_service import QueryRewriteService
 from app.services.history_service import HistoryService
-from app.services.query_router_service import QueryRouterService, QueryRoute
+from app.services.query_router_service import QueryCoverage, QueryIntent, QueryRouterService
 from app.services.summary_service import SummarizeService
+from app.repositories.legal_graph_repository import LegalGraphRepository
+from app.services.legal_effect_service import LegalEffectService
+from app.domain.legal_document import normalize_document_type_filter
 
 try:
     from rapidfuzz import fuzz
@@ -60,8 +63,7 @@ CITATION_PATTERN = re.compile(
 )
 CITATION_MATCH_THRESHOLD = 0.70          # ngưỡng khớp tên file (string/token)
 CITATION_COVERAGE_THRESHOLD = 0.80       # % citation hợp lệ / tổng citation
-SEMANTIC_Z_THRESHOLD = 1.0               # claim phải "nổi bật" >= 1 std so với các nguồn khác
-SEMANTIC_MIN_CANDIDATES = 2              # cần ít nhất 2 nguồn mới tính z-score có ý nghĩa
+SEMANTIC_SUPPORT_THRESHOLD = 0.45
 
 #hàm chuẩn hóa tên file để dễ so sánh tìm kiếm và đối chiếu document, ví dụ Luật đất đai-2024.pdf sẽ thành luật đất đai 2024
 def _normalize_filename(name: str) -> str:
@@ -130,6 +132,8 @@ class RagService:
         query_router_service: QueryRouterService,
         vector_repository: VectorRepository,
         summarize_service: SummarizeService,
+        legal_graph_repository: LegalGraphRepository | None = None,
+        legal_effect_service: LegalEffectService | None = None,
     ) -> None:
         self.history_service = history_service
         self.history_repository = history_repository
@@ -141,6 +145,8 @@ class RagService:
         self.query_router_service = query_router_service
         self.vector_repository = vector_repository
         self.summarize_service = summarize_service
+        self.legal_graph_repository = legal_graph_repository
+        self.legal_effect_service = legal_effect_service
 
     # ------------------------------------------------------------------
     # Dedup / format context
@@ -186,7 +192,7 @@ class RagService:
         return "\n\n---\n\n".join(sections)
 
     # ------------------------------------------------------------------
-    # Citation validation (string match và semantic z-score)
+    # Citation validation 
     # ------------------------------------------------------------------
     #so tên file bằng hàm token_similarity
     @staticmethod
@@ -241,7 +247,9 @@ class RagService:
         return {idx: _cosine(claim_vec, vec) for idx, vec in enumerate(excerpt_vecs)}
 
     def _validate_citations(
-        self, answer: str, sources: Sequence[RagSource]
+        self, answer: str, sources: Sequence[RagSource],
+        claims: Sequence[GroundedClaim] | None = None,
+        trusted_evidence: bool = False,
     ) -> dict[str, object]:
         """
         Trích các citation dạng [file, trang X-Y] hoặc [file, Điều Z] trong
@@ -253,20 +261,17 @@ class RagService:
         - Citation dạng "Điều": đối chiếu trực tiếp field `dieu` của source
           (sau khi chuẩn hoá qua _normalize_dieu), không dùng page_overlap.
 
-        Sau bước khớp tên/vị trí, xác thực thêm bằng semantic z-score giữa
-        câu chứa citation và excerpt của nguồn khớp nhất. Câu trả lời chỉ
-        được chấp nhận nếu tỷ lệ citation hợp lệ (matched / total) >=
-        CITATION_COVERAGE_THRESHOLD. Logic này dùng chung cho cả nhánh
-        SPECIFIC (_ask_specific, chỉ phát sinh citation dạng trang) và nhánh
-        SUMMARY (_ask_summary, có thể phát sinh cả 2 dạng) — không cần đổi gì
-        ở 2 hàm gọi vì chúng chỉ truyền answer/sources vào đây.
+        Sau bước khớp tên/vị trí, xác thực semantic giữa từng claim và excerpt.
+        Coverage được tính theo claim có trọng số, không dựa trên việc tách mọi
+        câu văn trong answer.
         """
         matched: list[dict[str, object]] = []
         unmatched: list[dict[str, object]] = []
 
         excerpt_vecs: list[list[float]] | None = None
-        if len(sources) >= SEMANTIC_MIN_CANDIDATES:
+        if sources and not trusted_evidence:
             excerpt_vecs = self._embed_excerpts(sources)
+        claim_records = tuple(claims or GenerationService._fallback_claims(answer))
 
         for match in CITATION_PATTERN.finditer(answer):
             file_cited = match.group("file")
@@ -303,6 +308,7 @@ class RagService:
                     best_source_idx = idx
 
             entry: dict[str, object] = {
+                "raw_citation": match.group(0),
                 "cited_file": file_cited.strip(),
                 "citation_type": "dieu" if is_dieu_citation else "trang",
                 "cited_location": (
@@ -320,39 +326,66 @@ class RagService:
             name_page_ok = best_name_score >= CITATION_MATCH_THRESHOLD #nếu bước 1 độ chính xác >70% thì coi như đạt yêu câu bước 1
 
             # Check Bước 2: chỉ chạy semantic check nếu name/vị trí đã khớp
-            if name_page_ok and best_source_idx is not None and excerpt_vecs is not None:
-                claim = self._extract_claim_sentence(answer, match.start())
+            if (name_page_ok and best_source_idx is not None
+                    and (trusted_evidence or excerpt_vecs is not None)):
+                structured_claim = next(
+                    (item for item in claim_records if match.group(0) in item.citations
+                     or match.group(0) in item.text), None
+                )
+                claim = structured_claim.text if structured_claim else self._extract_claim_sentence(answer, match.start())
+                entry["claim_id"] = structured_claim.claim_id if structured_claim else None
                 # RETRIEVAL_QUERY vì claim đang đóng vai trò "truy vấn" xem
                 # có khớp ngữ nghĩa với excerpt (RETRIEVAL_DOCUMENT) hay không.
-                claim_vec = self.embedding_client.embed_query(claim)
-                sem_scores = self._semantic_scores(claim_vec, excerpt_vecs)#tính điểm cosine similarity giữa claim và tất cả các excerpt
-
-                target_score = sem_scores[best_source_idx]
-                other_scores = [s for i, s in sem_scores.items() if i != best_source_idx]
-
-                if other_scores:
-                    mean_other = statistics.mean(other_scores)
-                    stdev_other = statistics.pstdev(other_scores) or 1e-6
-                    z = (target_score - mean_other) / stdev_other
+                if trusted_evidence:
+                    entry["semantic_supported"] = True
                 else:
-                    z = float("inf")  # không có nền để so sánh -> không loại trừ được
-
-                entry["semantic_score"] = round(target_score, 4)
-                entry["semantic_z"] = round(z, 4)
-                entry["semantic_supported"] = z >= SEMANTIC_Z_THRESHOLD
+                    claim_vec = self.embedding_client.embed_query(claim)
+                    sem_scores = self._semantic_scores(claim_vec, excerpt_vecs)
+                    target_score = sem_scores[best_source_idx]
+                    entry["semantic_score"] = round(target_score, 4)
+                    entry["semantic_z"] = None
+                    entry["semantic_supported"] = target_score >= SEMANTIC_SUPPORT_THRESHOLD
 
             is_valid = name_page_ok and entry["semantic_supported"] is not False
             (matched if is_valid else unmatched).append(entry)
 
         total = len(matched) + len(unmatched)
         coverage = (len(matched) / total) if total else 0.0 #tính toán xem số lượng citation answer do model đưa ra có > 80% không, nếu không thì câu trả lời đưa ra khômg đủ tin cậy => ANTI_HALLUCINATION
+        matched_raw = {str(item["raw_citation"]) for item in matched}
+        claim_checks: list[dict[str, object]] = []
+        supported_weight = 0.0
+        total_weight = 0.0
+        for claim in claim_records:
+            type_multiplier = 2.0 if claim.claim_type in {
+                "legal_conclusion", "condition", "exception", "comparison"
+            } else 1.0
+            weight = claim.importance * type_multiplier
+            valid_citations = [citation for citation in claim.citations if citation in matched_raw]
+            minimum = 2 if claim.claim_type == "comparison" and len(sources) >= 2 else 1
+            supported = len(valid_citations) >= minimum
+            total_weight += weight
+            if supported:
+                supported_weight += weight
+            claim_checks.append({"claim_id": claim.claim_id, "claim_type": claim.claim_type,
+                "weight": round(weight, 3), "citation_count": len(claim.citations),
+                "valid_citation_count": len(valid_citations), "supported": supported})
+        cited_claims = sum(1 for item in claim_checks if item["supported"])
+        claim_coverage = supported_weight / total_weight if total_weight else 0.0
 
         return {
             "citation_count": total,
             "matched_citations": matched,
             "unmatched_citations": unmatched,
             "coverage": round(coverage, 4),
-            "has_valid_citation": total > 0 and coverage >= CITATION_COVERAGE_THRESHOLD,
+            "claim_count": len(claim_records),
+            "cited_claim_count": cited_claims,
+            "claim_coverage": round(claim_coverage, 4),
+            "claim_checks": claim_checks,
+            "has_valid_citation": (
+                total > 0
+                and coverage >= CITATION_COVERAGE_THRESHOLD
+                and claim_coverage >= CITATION_COVERAGE_THRESHOLD
+            ),
         }
 
     # ------------------------------------------------------------------
@@ -363,23 +396,44 @@ class RagService:
         history_id: str,
         question: str,
         top_k: int,
-    )-> tuple[str, tuple[RagSource, ...], int, dict[str, object]]:
+        linh_vuc_filter: Sequence[str] | None = None,
+        document_type_filter: Sequence[str] | None = None,
+    ) -> tuple[str, tuple[RagSource, ...], int, dict[str, object]]:
         history_records = self.history_repository.list_messages(
             history_id, limit=self.history_limit
         )
         history = [(message.role, message.content) for message in history_records]
- 
+
         rewrite_started = time.perf_counter()
         rewrite = self.query_rewrite_service.rewrite(question, history)
         rewrite_ms = (time.perf_counter() - rewrite_started) * 1000
- 
+
         retrieval = self.retrieval_service.retrieve(
             history_id=history_id,
             original_query=question,
             dense_query=rewrite.retrieval_query,
             top_k=max(top_k * 2, top_k),
+            linh_vuc_filter=linh_vuc_filter,
+            document_type_filter=document_type_filter,
         )
         results = self._deduplicate(retrieval.results, top_k)
+
+        # Fallback an toàn: nếu lọc theo linh_vuc làm rỗng kết quả (do router
+        # phân loại sai câu hỏi, hoặc document bị phân loại sai lúc index),
+        # thử lại KHÔNG lọc thay vì trả NOT_FOUND oan — lọc lĩnh vực chỉ nên
+        # thu hẹp phạm vi tìm kiếm, không được phép loại bỏ câu trả lời đúng.
+        applied_linh_vuc_fallback = False
+        if not results and linh_vuc_filter:
+            retrieval = self.retrieval_service.retrieve(
+                history_id=history_id,
+                original_query=question,
+                dense_query=rewrite.retrieval_query,
+                top_k=max(top_k * 2, top_k),
+                document_type_filter=document_type_filter,
+            )
+            results = self._deduplicate(retrieval.results, top_k)
+            applied_linh_vuc_fallback = True
+
         sources = tuple(
             RagSource(
                 document_id=result.chunk.document_id,
@@ -396,11 +450,18 @@ class RagService:
         citation_validation: dict[str, object] | None = None
         if results:
             generation_started = time.perf_counter()
-            raw_answer = self.generation_service.generate(
-                question, self._format_context(results), history
-            )
+            generated_claims: Sequence[GroundedClaim] | None = None
+            if hasattr(self.generation_service, "generate_grounded"):
+                generated = self.generation_service.generate_grounded(
+                    question, self._format_context(results), history
+                )
+                raw_answer, generated_claims = generated.answer, generated.claims
+            else:
+                raw_answer = self.generation_service.generate(
+                    question, self._format_context(results), history
+                )
             generation_ms = (time.perf_counter() - generation_started) * 1000
-            citation_validation = self._validate_citations(raw_answer, sources)
+            citation_validation = self._validate_citations(raw_answer, sources, generated_claims)
             if citation_validation["has_valid_citation"]:
                 answer = raw_answer
             else:
@@ -411,6 +472,12 @@ class RagService:
         warnings = list(branch_trace.get("warnings") or [])
         if rewrite.warning:
             warnings.insert(0, rewrite.warning)
+        if applied_linh_vuc_fallback:
+            warnings.insert(
+                0,
+                f"Lọc theo lĩnh vực {list(linh_vuc_filter)} không có kết quả, "
+                "đã tự động thử lại không lọc lĩnh vực.",
+            )
         branch_trace["warnings"] = warnings
         branch_trace["rewrite"] = {
             "strategy": "hyde" if rewrite.used_hyde else "original_query",
@@ -425,15 +492,24 @@ class RagService:
         }
         if citation_validation is not None:
             branch_trace["citation_validation"] = citation_validation
- 
-        return answer, sources, len(results), branch_trace
 
+        return answer, sources, len(results), branch_trace
     def _ask_summary(
             self,
             history_id: str,
             question: str,
+            target_documents: Sequence[str] | None = None,
+            coverage: QueryCoverage = QueryCoverage.MULTI_ASPECT,
+            document_type_filter: Sequence[str] | None = None,
     )-> tuple[str, tuple[RagSource, ...], int, dict[str, object]]:
-        summary_result = self.summarize_service.run(history_id, question)
+        run_parameters = inspect.signature(self.summarize_service.run).parameters
+        run_kwargs: dict[str, object] = {"target_documents": target_documents}
+        if "full_enumeration" in run_parameters:
+            
+            run_kwargs["full_enumeration"] = coverage == QueryCoverage.FULL_ENUMERATION
+        if "document_type_filter" in run_parameters:
+            run_kwargs["document_type_filter"] = document_type_filter
+        summary_result = self.summarize_service.run(history_id, question, **run_kwargs)
         raw_answer = summary_result.answer
         sources = tuple(
             RagSource(
@@ -448,8 +524,10 @@ class RagService:
             for h in summary_result.sources
         )
 
-        citation_validation = self._validate_citations(raw_answer, sources)
-        if citation_validation["has_valid_citation"]:
+        citation_validation = self._validate_citations(
+            raw_answer, sources, getattr(summary_result, "claims", None)
+        )
+        if not sources or citation_validation["has_valid_citation"]:
             answer = raw_answer
         else:
             answer = ANTI_HALLUCINATION_ANSWER
@@ -457,8 +535,208 @@ class RagService:
         branch_trace: dict[str, object] = {
             "summary_scope": summary_result.scope_document_ids,
             "citation_validation": citation_validation,
+            "coverage": {
+                "documents_considered": len(summary_result.scope_document_ids),
+                "documents_matched": len({source.document_id for source in sources}),
+                "source_chunks": len(sources),
+                "provisions_expected": getattr(summary_result, "total_provisions", len(sources)),
+                "provisions_covered": getattr(summary_result, "covered_provisions", len(sources)),
+                "failed_map_groups": getattr(summary_result, "failed_map_groups", 0),
+            },
         }
         return answer, sources, len(sources), branch_trace
+
+    def _ask_compare(
+        self,
+        history_id: str,
+        question: str,
+        target_documents: Sequence[str] | None,
+        top_k: int,
+        comparison_aspects: Sequence[str] | None = None,
+        document_type_filter: Sequence[str] | None = None,
+    ) -> tuple[str, tuple[RagSource, ...], int, dict[str, object]]:
+        documents = [
+            document for document in self.history_repository.list_documents(history_id)
+            if document.status == DocumentStatus.READY.value
+        ]
+        normalized_types = normalize_document_type_filter(document_type_filter)
+        if normalized_types:
+            if self.legal_graph_repository is None:
+                documents = []
+            else:
+                allowed_upload_ids = self.legal_graph_repository.list_upload_document_ids_by_types(
+                    history_id, normalized_types
+                )
+                documents = [
+                    document for document in documents
+                    if document.id in allowed_upload_ids
+                ]
+        selected = documents
+        if target_documents:
+            graph_upload_ids: set[str] = set()
+            if self.legal_graph_repository is not None:
+                for legal_document in self.legal_graph_repository.list_documents(history_id):
+                    upload_id = legal_document.get("upload_document_id")
+                    searchable = " ".join(
+                        str(legal_document.get(field) or "")
+                        for field in ("document_number", "title", "document_type")
+                    )
+                    if upload_id and any(
+                        _normalize_filename(ref) in _normalize_filename(searchable)
+                        for ref in target_documents
+                    ):
+                        graph_upload_ids.add(str(upload_id))
+            selected = [
+                document for document in documents
+                if document.id in graph_upload_ids or any(
+                    _normalize_filename(ref) in _normalize_filename(document.file_name)
+                    or _normalize_filename(document.file_name) in _normalize_filename(ref)
+                    for ref in target_documents
+                )
+            ]
+        if len(selected) < 2:
+            return (
+                "Cần xác định ít nhất hai văn bản đã tải lên để so sánh.",
+                (), 0,
+                {"warnings": ["Không resolve được ít nhất hai văn bản."], "coverage": {"documents_considered": len(selected)}},
+            )
+        history_records = self.history_repository.list_messages(history_id, limit=self.history_limit)
+        history = [(message.role, message.content) for message in history_records]
+        context_by_document: dict[str, str] = {}
+        all_results: list[SearchResult] = []
+        per_document_k = max(2, top_k)
+        aspects = list(comparison_aspects or []) or [question]
+        aspect_cells = 0
+        for document in selected:
+            for aspect in aspects:
+                retrieval = self.retrieval_service.retrieve(
+                    history_id=history_id, original_query=aspect, dense_query=aspect,
+                    top_k=per_document_k, document_ids=[document.id],
+                    document_type_filter=normalized_types,
+                )
+                results = self._deduplicate(retrieval.results, per_document_k)
+                all_results.extend(results)
+                if results:
+                    aspect_cells += 1
+                context_by_document[f"{document.file_name} — {aspect}"] = (
+                    self._format_context(results) or "Không tìm thấy nội dung tương ứng."
+                )
+        sources = tuple(
+            RagSource(
+                document_id=result.chunk.document_id,
+                file_name=result.chunk.file_name,
+                page_number=result.chunk.page_number,
+                page_end_number=result.chunk.page_end_number,
+                dieu=result.chunk.dieu,
+                score=result.score,
+                excerpt=result.chunk.text[:600],
+            )
+            for result in all_results
+        )
+        comparison_claims: Sequence[GroundedClaim] | None = None
+        if hasattr(self.generation_service, "generate_comparison_grounded"):
+            generated = self.generation_service.generate_comparison_grounded(
+                question, context_by_document, history
+            )
+            raw_answer, comparison_claims = generated.answer, generated.claims
+        else:
+            raw_answer = self.generation_service.generate_comparison(
+                question, context_by_document, history
+            )
+        validation = self._validate_citations(raw_answer, sources, comparison_claims)
+        answer = raw_answer if validation["has_valid_citation"] else ANTI_HALLUCINATION_ANSWER
+        return answer, sources, len(all_results), {
+            "citation_validation": validation,
+            "coverage": {
+                "documents_considered": len(selected),
+                "documents_matched": len({source.document_id for source in sources}),
+                "aspects": aspects,
+                "aspect_cells_expected": len(selected) * len(aspects),
+                "aspect_cells_matched": aspect_cells,
+            },
+        }
+
+    def _ask_current_effect(
+        self,
+        history_id: str,
+        targets: Sequence[str],
+        as_of_date: str | None,
+        document_type_filter: Sequence[str] | None = None,
+    ) -> tuple[str, tuple[RagSource, ...], int, dict[str, object]]:
+        if self.legal_effect_service is None:
+            return "Chưa cấu hình bộ kiểm tra hiệu lực.", (), 0, {"warnings": ["effect_service_missing"]}
+        result = self.legal_effect_service.evaluate(
+            history_id, targets, as_of_date, document_type_filter
+        )
+        sources = tuple(RagSource(**item) for item in result["sources"])
+        validation = self._validate_citations(
+            result["answer"], sources, trusted_evidence=True
+        ) if sources else None
+        return result["answer"], sources, len(sources), {
+            "effect_status": result["status"], "warnings": result["warnings"],
+            "citation_validation": validation,
+        }
+
+    def _ask_relationship(
+        self,
+        history_id: str,
+        question: str,
+        target_documents: Sequence[str] | None,
+        document_type_filter: Sequence[str] | None = None,
+    ) -> tuple[str, tuple[RagSource, ...], int, dict[str, object]]:
+        if self.legal_graph_repository is None:
+            return self._ask_specific(
+                history_id,
+                question,
+                max(1, self.history_limit),
+                document_type_filter=document_type_filter,
+            )
+        details = self.legal_graph_repository.list_relation_details(
+            history_id, document_type_filter
+        )
+        if target_documents:
+            normalized_targets = [_normalize_filename(value) for value in target_documents]
+            details = [
+                item for item in details
+                if any(
+                    target in _normalize_filename(str(item.get("source_number") or ""))
+                    or target in _normalize_filename(str(item.get("target_number") or ""))
+                    for target in normalized_targets
+                )
+            ]
+        if not details:
+            return "Không tìm thấy quan hệ có chứng cứ trong các tài liệu đã tải lên.", (), 0, {"coverage": {"relations": 0}}
+        relation_labels = {
+            "SUA_DOI": "sửa đổi", "BO_SUNG": "bổ sung", "SUA_DOI_BO_SUNG": "sửa đổi, bổ sung",
+            "BAI_BO": "bãi bỏ", "BAI_BO_MOT_PHAN": "bãi bỏ một phần",
+            "THAY_THE": "thay thế", "DINH_CHI": "đình chỉ", "GIA_HAN": "gia hạn",
+            "HUONG_DAN_THI_HANH": "hướng dẫn thi hành",
+            "QUY_DINH_CHI_TIET": "quy định chi tiết", "CAN_CU": "căn cứ vào",
+            "HOP_NHAT": "hợp nhất",
+        }
+        sources = tuple(
+            RagSource(
+                document_id=item["upload_document_id"],
+                file_name=item["source_file_name"] or "tài liệu đã tải lên",
+                page_number=item["page_number"],
+                page_end_number=item["page_end_number"],
+                dieu=None,
+                score=float(item["confidence"]),
+                excerpt=item["quote"],
+            ) for item in details
+        )
+        lines = []
+        for item, source in zip(details, sources):
+            pages = str(source.page_number) if source.page_number == source.page_end_number else f"{source.page_number}-{source.page_end_number}"
+            lines.append(
+                f"{item['source_number'] or source.file_name} {relation_labels.get(item['relation_type'], item['relation_type'])} "
+                f"{item['target_number'] or item['raw_target_reference']} [{source.file_name}, trang {pages}]"
+            )
+        answer = "\n".join(f"- {line}" for line in lines)
+        validation = self._validate_citations(answer, sources, trusted_evidence=True)
+        return answer, sources, len(details), {
+            "coverage": {"relations": len(details)}, "citation_validation": validation
+        }
 
     def ask(
         self,
@@ -476,14 +754,43 @@ class RagService:
             raise NoReadyDocumentError(
                 "Phiên chưa có tài liệu đã lập chỉ mục thành công"
             )
-        route_result = self.query_router_service.route(question)
-        if route_result.route == QueryRoute.SUMMARY:
+        route_result = self.query_router_service.route(
+            question,
+            has_chat_history=self.history_service.message_count(history_id) > 0,
+        )
+        if route_result.intent in (
+            QueryIntent.DOCUMENT_SUMMARY,
+            QueryIntent.MULTI_DOCUMENT_SYNTHESIS,
+        ):
             answer, sources, retrieved_count, branch_trace = self._ask_summary(
-                history_id, question
+                history_id, question, route_result.target_documents, route_result.coverage,
+                route_result.loai_van_ban_filter,
+            )
+        elif route_result.intent == QueryIntent.COMPARE:
+            answer, sources, retrieved_count, branch_trace = self._ask_compare(
+                history_id, question, route_result.target_documents, top_k,
+                route_result.comparison_aspects,
+                route_result.loai_van_ban_filter,
+            )
+        elif route_result.intent == QueryIntent.RELATIONSHIP:
+            answer, sources, retrieved_count, branch_trace = self._ask_relationship(
+                history_id, question, route_result.target_documents,
+                route_result.loai_van_ban_filter,
+            )
+        elif route_result.intent == QueryIntent.CURRENT_EFFECT_CHECK:
+            answer, sources, retrieved_count, branch_trace = self._ask_current_effect(
+                history_id, route_result.target_documents, route_result.as_of_date,
+                route_result.loai_van_ban_filter,
             )
         else:
+            # fact_lookup, current_effect_check: chỉ 2 nhánh này dùng linh_vuc
+            # để thu hẹp phạm vi retrieval.
             answer, sources, retrieved_count, branch_trace = self._ask_specific(
-                history_id, question, top_k
+                history_id,
+                question,
+                top_k,
+                linh_vuc_filter=route_result.linh_vuc or None,
+                document_type_filter=route_result.loai_van_ban_filter or None,
             )
  
         # Phần lưu lịch sử — DÙNG CHUNG cho cả 2 nhánh, không trùng lặp code
@@ -499,7 +806,13 @@ class RagService:
         trace: dict[str, object] | None = None
         if include_trace:
             trace = branch_trace
-            trace["route"] = route_result.route.value
+            trace["route"] = route_result.intent.value
+            trace["scope"] = route_result.scope.value
+            trace["coverage"] = route_result.coverage.value
+            trace["router_source"] = route_result.source
+            trace["document_type_filter"] = (
+                route_result.loai_van_ban_filter or None
+            )
             trace["total_time_ms"] = round(
                 (time.perf_counter() - request_started) * 1000, 3
             )

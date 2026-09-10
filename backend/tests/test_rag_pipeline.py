@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.repositories.history_repository import HistoryRepository
+from app.repositories.user_repository import UserRepository
 from app.repositories.vector_repository import VectorRepository
 from app.services.chunking_service import LegalChunkingService
 from app.services.document_parser import DocumentParser
@@ -25,6 +26,11 @@ class FakeEmbeddingService:
 
     def embed_query(self, _question):
         return [1.0, 0.0, 0.0]
+
+
+class FakeDocumentParser:
+    def parse(self, file_path, original_file_name):
+        return [(1, file_path.read_text(encoding="utf-8"))]
 
 
 class FakeGenerationService:
@@ -57,9 +63,19 @@ class FakeRetrievalService:
         self._vector_repository = vector_repository
         self._embedding_service = embedding_service
 
-    def retrieve(self, history_id, original_query, dense_query, top_k):
+    def retrieve(
+        self, history_id, original_query, dense_query, top_k,
+        document_ids=None, linh_vuc_filter=None, document_type_filter=None,
+    ):
         query_vec = self._embedding_service.embed_query(dense_query)
-        results = self._vector_repository.query(history_id, query_vec, top_k)
+        results = self._vector_repository.query(
+            history_id,
+            query_vec,
+            top_k,
+            document_ids=document_ids,
+            linh_vuc_filter=linh_vuc_filter,
+            document_type_filter=document_type_filter,
+        )
         return SimpleNamespace(results=results, trace={"warnings": []})
 
 
@@ -71,7 +87,7 @@ class FakeSummarizeService:
         self._sources = tuple(sources)
         self._scope_document_ids = tuple(scope_document_ids)
 
-    def run(self, history_id, question):
+    def run(self, history_id, question, target_documents=None):
         return SimpleNamespace(
             answer=self._answer,
             sources=self._sources,
@@ -102,21 +118,25 @@ class RagServiceTestBase(unittest.TestCase):
         logger = logging.getLogger("test.rag_service")
 
         self.histories = HistoryRepository(root / "state.db")
+        user = UserRepository(root / "state.db").create_user(
+            "Test", "test@example.com", "hash"
+        )
         self.vectors = VectorRepository(root / "chroma", "rag_service_test", "fake-model")
+        self.addCleanup(self.vectors.close)
         self.history_service = HistoryService(self.histories, self.vectors, logger)
         self.embeddings = FakeEmbeddingService()
         self.indexing = IndexingService(
             self.history_service,
             self.histories,
             self.vectors,
-            DocumentParser(),
+            FakeDocumentParser(),
             LegalChunkingService(500, 50, logger),
             self.embeddings,
             logger,
         )
 
-        self.history = self.history_service.create()
-        upload = root / "upload.txt"
+        self.history = self.history_service.create(user["id"], "Test")
+        upload = root / "upload.pdf"
         upload.write_text(
             "Điều 1: Nghĩa vụ thanh toán\nBên A phải thanh toán đúng hạn.",
             encoding="utf-8",
@@ -125,8 +145,8 @@ class RagServiceTestBase(unittest.TestCase):
             self.history.id,
             "test-user",           # user_id
             upload,                 # temp_path
-            "hop_dong.txt",          # original_file_name
-            "text/plain",            # mime_type
+            "hop_dong.txt",          # logical fixture name; parser is replaced above
+            "application/pdf",       # mime_type
             upload.stat().st_size,   # size_bytes
         )
         self.assertEqual(self.document.status, "ready")

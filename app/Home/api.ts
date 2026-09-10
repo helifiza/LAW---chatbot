@@ -7,6 +7,8 @@ export type ApiDocument = {
   chunk_count: number;
   error_message: string | null;
   created_at: string;
+  graph_status: "pending" | "processing" | "ready" | "failed" | "skipped";
+  graph_error: string | null;
 };
 
 export type ApiMessage = {
@@ -62,6 +64,32 @@ export type QuestionResult = {
   answer: string;
   sources: QuestionSource[];
   retrieved_count: number;
+};
+
+export type LegalGraphDocument = {
+  id: string;
+  upload_document_id: string | null;
+  document_number: string | null;
+  document_type: string | null;
+  title: string | null;
+  effective_date: string | null;
+  primary_linh_vuc_code: string | null;
+  source_type: "user_upload" | "referenced_only";
+  verification_status: string;
+};
+
+export type LegalGraphSnapshot = {
+  documents: LegalGraphDocument[];
+  fields: Array<{ document_id: string; linh_vuc_code: string; is_primary: number }>;
+  provisions: Array<Record<string, unknown>>;
+  relations: Array<Record<string, unknown>>;
+  relation_provisions: Array<Record<string, unknown>>;
+  evidence: Array<Record<string, unknown>>;
+  metadata_evidence: Array<Record<string, unknown>>;
+  pagination: {
+    limit: number; offset: number; document_total: number;
+    relation_total: number; provision_total: number;
+  };
 };
 
 export const API_BASE_URL =
@@ -199,4 +227,8 @@ export function archiveHistory(historyId: string): Promise<HistoryInfo> {
 
 export function reopenHistory(historyId: string): Promise<HistoryInfo> {
   return request<HistoryInfo>(`/histories/${historyId}/reopen`, { method: "PATCH" });
+}
+
+export function getLegalGraph(historyId: string): Promise<LegalGraphSnapshot> {
+  return request<LegalGraphSnapshot>(`/histories/${historyId}/legal-graph`);
 }

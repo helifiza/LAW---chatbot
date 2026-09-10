@@ -1,1 +1,1 @@
-This is a temporary placeholder file.
+"""Reserved for temporary authentication service patches."""

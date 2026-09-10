@@ -2,7 +2,7 @@ from __future__ import annotations
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Sequence
 
@@ -74,6 +74,9 @@ class HistoryRepository:
                     chunk_count INTEGER NOT NULL DEFAULT 0,
                     error_message TEXT,
                     created_at TEXT NOT NULL,
+                    linh_vuc TEXT,
+                    graph_status TEXT NOT NULL DEFAULT 'pending',
+                    graph_error TEXT,
                     FOREIGN KEY(history_id) REFERENCES history(id)
                         ON DELETE CASCADE
                 );
@@ -94,6 +97,21 @@ class HistoryRepository:
                     ON messages(history_id, id);
                 """
             )
+            # Migration cho csdl đã tồn tại từ trước khi có cột linh_vuc — CREATE
+            # TABLE IF NOT EXISTS ở trên không thêm cột vào bảng đã có sẵn.
+            try:
+                connection.execute("ALTER TABLE documents ADD COLUMN linh_vuc TEXT")
+            except sqlite3.OperationalError:
+                pass  # cột đã tồn tại
+
+            for statement in (
+                "ALTER TABLE documents ADD COLUMN graph_status TEXT NOT NULL DEFAULT 'pending'",
+                "ALTER TABLE documents ADD COLUMN graph_error TEXT",
+            ):
+                try:
+                    connection.execute(statement)
+                except sqlite3.OperationalError:
+                    pass
 
     @staticmethod
     def _history_from_row(row: sqlite3.Row) -> HistoryRecord:
@@ -118,6 +136,9 @@ class HistoryRepository:
             chunk_count=int(row["chunk_count"]),
             error_message=row["error_message"],
             created_at=_from_iso(row["created_at"]),
+            linh_vuc=row["linh_vuc"],
+            graph_status=row["graph_status"],
+            graph_error=row["graph_error"],
         )
 
     @staticmethod
@@ -233,14 +254,17 @@ class HistoryRepository:
             chunk_count=0,
             error_message=None,
             created_at=now,
+            linh_vuc=None,
+            graph_status="pending",
+            graph_error=None,
         )
         with self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO documents(
                     id, history_id, file_name, mime_type, size_bytes,
-                    status, chunk_count, error_message, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    status, chunk_count, error_message, created_at, linh_vuc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     document.id,
@@ -252,6 +276,7 @@ class HistoryRepository:
                     document.chunk_count,
                     document.error_message,
                     _to_iso(document.created_at),
+                    document.linh_vuc,
                 ),
             )
         return document
@@ -271,6 +296,30 @@ class HistoryRepository:
                 WHERE id = ?
                 """,
                 (status, chunk_count, error_message, document_id),
+            )
+        return self.get_document(document_id)
+
+    def update_document_linh_vuc(
+        self,
+        document_id: str,
+        linh_vuc: str | None,
+    ) -> DocumentRecord | None:
+        """Gọi sau khi LinhVucClassificationService phân loại xong. Cho phép ghi None (giữ nguyên "chưa xác định") nếu phân
+        loại thất bại hoặc model không chắc chắn."""
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE documents SET linh_vuc = ? WHERE id = ?",
+                (linh_vuc, document_id),
+            )
+        return self.get_document(document_id)
+
+    def update_document_graph_status(
+        self, document_id: str, status: str, error_message: str | None = None
+    ) -> DocumentRecord | None:
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE documents SET graph_status = ?, graph_error = ? WHERE id = ?",
+                (status, error_message, document_id),
             )
         return self.get_document(document_id)
 

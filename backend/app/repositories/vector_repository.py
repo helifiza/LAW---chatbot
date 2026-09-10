@@ -7,6 +7,7 @@ from typing import Sequence
 import chromadb
 
 from app.domain.models import ChunkDetail, SearchResult
+from app.domain.legal_document import normalize_document_type, normalize_document_type_filter
 
 
 class VectorRepository:
@@ -63,6 +64,10 @@ class VectorRepository:
                 "Hãy đổi CHROMA_COLLECTION_NAME hoặc embedding lại dữ liệu."
             )
 
+    def close(self) -> None:
+        """Release Chroma file handles, especially required on Windows."""
+        self._client.close()
+
     @staticmethod
     def _metadata(chunk: ChunkDetail) -> dict[str, object]:
         return {
@@ -76,6 +81,8 @@ class VectorRepository:
             "chuong": chunk.chuong or "",
             "muc": chunk.muc or "",
             "dieu": chunk.dieu or "",
+            "linh_vuc": chunk.linh_vuc or "",
+            "document_type": normalize_document_type(chunk.document_type) or "",
             "chunk_index": chunk.chunk_index,
             "char_count": chunk.char_count,
             "token_count": chunk.token_count,
@@ -100,12 +107,33 @@ class VectorRepository:
             chuong=str(metadata.get("chuong") or "") or None,
             muc=str(metadata.get("muc") or "") or None,
             dieu=str(metadata.get("dieu") or "") or None,
+            linh_vuc=str(metadata.get("linh_vuc") or "") or None,
+            document_type=str(metadata.get("document_type") or "") or None,
             text=text,
             chunk_index=int(metadata["chunk_index"]),
             char_count=int(metadata.get("char_count") or len(text)),
             token_count=int(metadata.get("token_count") or 0),
             created_at=str(metadata.get("created_at") or ""),
         )
+
+    @staticmethod
+    def _build_where(
+        history_id: str,
+        document_ids: Sequence[str] | None = None,
+        linh_vuc_filter: Sequence[str] | None = None,
+        document_type_filter: Sequence[str] | None = None,
+    ) -> dict[str, object]:
+        conditions: list[dict[str, object]] = [{"history_id": history_id}]
+        if document_ids:
+            conditions.append({"document_id": {"$in": list(document_ids)}})
+        if linh_vuc_filter:
+            conditions.append({"linh_vuc": {"$in": list(linh_vuc_filter)}})
+        normalized_types = normalize_document_type_filter(document_type_filter)
+        if normalized_types:
+            conditions.append({"document_type": {"$in": list(normalized_types)}})
+        if len(conditions) == 1:
+            return conditions[0]
+        return {"$and": conditions}
 
     def upsert(
         self,
@@ -136,8 +164,13 @@ class VectorRepository:
         history_id: str,
         query_embedding: Sequence[float],
         top_k: int,
+        document_ids: Sequence[str] | None = None,
+        linh_vuc_filter: Sequence[str] | None = None,
+        document_type_filter: Sequence[str] | None = None,
     ) -> list[SearchResult]:
-        where = {"history_id": history_id}
+        where = self._build_where(
+            history_id, document_ids, linh_vuc_filter, document_type_filter
+        )
         with self._lock:
             matching = self._collection.get(where=where, include=[])
             matching_count = len(matching.get("ids") or [])
@@ -209,11 +242,31 @@ class VectorRepository:
             if text is None or metadata is None:
                 continue
             chunks.append(self._chunk_from_result(element_id, text, metadata))
-        # Sắp theo document_id rồi chunk_index để giữ đúng thứ tự văn bản gốc
-        # trong từng document — quan trọng cho bước dedupe theo `dieu` và Map
-        # ở SummarizeService (cần đọc các chunk liền kề theo đúng trình tự).
         chunks.sort(key=lambda c: (c.document_id, c.chunk_index))
         return chunks
+
+    def update_document_metadata(
+        self,
+        history_id: str,
+        document_id: str,
+        *,
+        document_type: str | None,
+    ) -> int:
+        """Patch chunk metadata without recomputing or replacing embeddings."""
+        where = self._build_where(history_id, [document_id])
+        with self._lock:
+            result = self._collection.get(where=where, include=["metadatas"])
+            ids = result.get("ids") or []
+            metadatas = result.get("metadatas") or []
+            if not ids:
+                return 0
+            normalized = normalize_document_type(document_type) or ""
+            updated = [
+                dict(metadata or {}, document_type=normalized)
+                for metadata in metadatas
+            ]
+            self._collection.update(ids=ids, metadatas=updated)
+        return len(ids)
 
     def delete_document(self, history_id: str, document_id: str) -> None:
         with self._lock:

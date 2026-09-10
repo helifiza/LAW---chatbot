@@ -66,6 +66,7 @@ class Settings:
     max_top_k: int
     min_similarity: float
     history_message_limit: int
+    max_history_documents: int
 
     jwt_secret: str
     jwt_algorithm: str = "HS256"
@@ -155,6 +156,9 @@ class Settings:
             max_top_k=int(os.getenv("MAX_TOP_K", "20")),
             min_similarity=float(os.getenv("MIN_SIMILARITY", "0.20")),
             history_message_limit=int(os.getenv("HISTORY_MESSAGE_LIMIT", "8")),
+            max_history_documents=max(
+                1, int(os.getenv("MAX_SESSION_DOCUMENTS", "5"))
+            ),
             jwt_secret=os.getenv(
                 "JWT_SECRET",
                 "dev-secret-change-this",
