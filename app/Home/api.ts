@@ -43,6 +43,11 @@ export type HistorySummary = {
   updated_at: string;
 };
 
+export type DeletedHistorySummary = HistorySummary & {
+  user_id: string;
+  deleted_at: string;
+};
+
 
 export type UploadResult = {
   documents: ApiDocument[];
@@ -219,6 +224,16 @@ export function askHistoryQuestion(
 
 export function listHistories(): Promise<HistorySummary[]> {
   return request<HistorySummary[]>("/histories");
+}
+
+export function listDeletedHistories(): Promise<DeletedHistorySummary[]> {
+  return request<DeletedHistorySummary[]>("/admin/histories/deleted");
+}
+
+export function restoreDeletedHistory(historyId: string): Promise<HistoryInfo> {
+  return request<HistoryInfo>(`/admin/histories/${historyId}/restore`, {
+    method: "PATCH",
+  });
 }
 
 export function archiveHistory(historyId: string): Promise<HistoryInfo> {

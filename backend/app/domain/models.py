@@ -55,6 +55,7 @@ class HistoryRecord:
     status: str
     created_at: datetime
     updated_at: datetime
+    deleted_at: datetime | None = None
 
 
 @dataclass(frozen=True)

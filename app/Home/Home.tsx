@@ -16,13 +16,17 @@ import {
   askHistoryQuestion,
   clearHistoryDocuments,
   archiveHistory,
+  closeHistory,
   createHistory,
   deleteHistoryDocument,
   getHistory,
   getLegalGraph,
   logout,
   uploadHistoryDocuments,
+  listDeletedHistories,
   listHistories,
+  restoreDeletedHistory,
+  type DeletedHistorySummary,
   type HistorySummary,
   type ApiDocument,
   type HistorySnapshot,
@@ -34,13 +38,27 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const ALLOWED_EXTENSIONS = ["pdf"];
 const HISTORY_STORAGE_KEY = "slaw.rag.history_id";
 
-function storedUserId(): string | null {
+type StoredUser = {
+  id: string;
+  full_name: string;
+  email: string;
+  role: string;
+};
+
+function storedUser(): StoredUser | null {
   if (typeof window === "undefined") return null;
   const stored = window.localStorage.getItem("slaw.user");
   if (!stored) return null;
   try {
-    const user = JSON.parse(stored) as { id?: string };
-    return user.id ?? null;
+    const user = JSON.parse(stored) as Partial<StoredUser>;
+    return user.id && user.role
+      ? {
+          id: user.id,
+          full_name: user.full_name ?? user.id,
+          email: user.email ?? "",
+          role: user.role,
+        }
+      : null;
   } catch {
     window.localStorage.removeItem("slaw.user");
     return null;
@@ -256,8 +274,11 @@ async function restoreOrCreateHistory(): Promise<HistorySnapshot | null> {
 
 export default function Home() {
   const router = useRouter();
-  const [view, setView] = useState<"chat" | "history">("chat");
+  const [view, setView] = useState<"chat" | "history" | "trash">("chat");
   const [historyList, setHistoryList] = useState<HistorySummary[]>([]);
+  const [deletedHistoryList, setDeletedHistoryList] = useState<
+    DeletedHistorySummary[]
+  >([]);
   const [isHistoryListLoading, setIsHistoryListLoading] = useState(false);
   const [historySearch, setHistorySearch] = useState("");
   const [historyId, setHistoryId] = useState<string | null>(null);
@@ -272,7 +293,7 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [userId] = useState<string | null>(storedUserId);
+  const [currentUser, setCurrentUser] = useState<StoredUser | null>(null);
   const [showLogout, setShowLogout] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const initializationRef = useRef<Promise<HistorySnapshot | null> | null>(null);
@@ -299,6 +320,13 @@ export default function Home() {
         .map((item) => item.file_name),
     [documents, pendingIds],
   );
+  const filteredDeletedHistoryList = useMemo(
+    () =>
+      deletedHistoryList.filter((item) =>
+        (item.title || "").toLowerCase().includes(historySearch.toLowerCase()),
+      ),
+    [deletedHistoryList, historySearch],
+  );
   const legalDocumentByUploadId = useMemo(
     () => new Map(
       legalDocuments
@@ -314,6 +342,7 @@ export default function Home() {
     initializationRef.current
       .then((snapshot) => {
         if (!active) return;
+        setCurrentUser(storedUser());
         if (!snapshot) {
           setHistoryId(null);
           setDocuments([]);
@@ -537,6 +566,7 @@ export default function Home() {
 
   async function openHistoryList() {
     setView("history");
+    setHistorySearch("");
     setIsHistoryListLoading(true);
     try {
       setHistoryList(await listHistories());
@@ -548,6 +578,64 @@ export default function Home() {
       );
     } finally {
       setIsHistoryListLoading(false);
+    }
+  }
+
+  async function openDeletedHistoryList() {
+    setView("trash");
+    setHistorySearch("");
+    setIsHistoryListLoading(true);
+    try {
+      setDeletedHistoryList(await listDeletedHistories());
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Không tải được danh sách lịch sử đã xóa.",
+      );
+    } finally {
+      setIsHistoryListLoading(false);
+    }
+  }
+
+  async function deleteHistoryFromList(id: string) {
+    if (!window.confirm("Bạn có muốn xóa cuộc trò chuyện này?")) {
+      return;
+    }
+    setError("");
+    try {
+      await closeHistory(id);
+      setHistoryList((current) => current.filter((item) => item.history_id !== id));
+      if (id === historyId) {
+        window.localStorage.removeItem(HISTORY_STORAGE_KEY);
+        setHistoryId(null);
+        setDocuments([]);
+        setLegalDocuments([]);
+        setPendingIds([]);
+        setMessages(INITIAL_MESSAGES);
+      }
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Không thể xóa cuộc trò chuyện.",
+      );
+    }
+  }
+
+  async function restoreHistoryFromTrash(id: string) {
+    setError("");
+    try {
+      await restoreDeletedHistory(id);
+      setDeletedHistoryList((current) =>
+        current.filter((item) => item.history_id !== id),
+      );
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Không thể khôi phục cuộc trò chuyện.",
+      );
     }
   }
 
@@ -724,6 +812,17 @@ export default function Home() {
                 <Icon name = "history" size = {17}/>
                 <span>History</span>
               </button>
+              {currentUser?.role === "admin" && (
+                <button
+                  className={styles.historyToggle}
+                  type="button"
+                  onClick={() => void openDeletedHistoryList()}
+                  disabled={isHistoryLoading || isUploading || isLoading}
+                >
+                  <Icon name="trash" size={17} />
+                  <span>Thùng rác</span>
+                </button>
+              )}
             </div>
           </div>
           <div className={styles.fileSection}>
@@ -805,7 +904,7 @@ export default function Home() {
                   <Icon name="user" size={19} />
                 </span>
                 <span>
-                  <strong>{userId ?? "Phiên cục bộ"}</strong>
+                  <strong>{currentUser?.full_name ?? "Phiên cục bộ"}</strong>
                   <small>
                     {historyId ? `Phiên ${historyId.slice(0, 8)}` : "Đang kết nối"}
                   </small>
@@ -833,7 +932,7 @@ export default function Home() {
         )}
 
         
-        {view === "history" ? (
+        {view === "history" || view === "trash" ? (
           <section className={styles.chatArea}>
             <header className={styles.chatHeader}>
               <button
@@ -845,7 +944,7 @@ export default function Home() {
                 <Icon name="menu" />
               </button>
               <div className={styles.chatTitle}>
-                <h1>Chats</h1>
+                <h1>{view === "trash" ? "Lịch sử đã xóa" : "Chats"}</h1>
               </div>
             </header>
             <div className={styles.historyListWrap}>
@@ -862,21 +961,30 @@ export default function Home() {
                 <thead>
                   <tr>
                     <th>Title</th>
-                    <th>Updated at</th>
+                    <th>{view === "trash" ? "Đã xóa lúc" : "Updated at"}</th>
+                    {view === "trash" && <th>User</th>}
+                    <th aria-label="Thao tác" />
                   </tr>
                 </thead>
                 <tbody>
                   {isHistoryListLoading && (
                     <tr>
-                      <td colSpan={2}>Đang tải…</td>
+                      <td colSpan={view === "trash" ? 4 : 3}>Đang tải…</td>
                     </tr>
                   )}
-                  {!isHistoryListLoading && filteredHistoryList.length === 0 && (
+                  {!isHistoryListLoading &&
+                    (view === "trash"
+                      ? filteredDeletedHistoryList.length === 0
+                      : filteredHistoryList.length === 0) && (
                     <tr>
-                      <td colSpan={2}>Chưa có cuộc trò chuyện nào.</td>
+                      <td colSpan={view === "trash" ? 4 : 3}>
+                        {view === "trash"
+                          ? "Thùng rác đang trống."
+                          : "Chưa có cuộc trò chuyện nào."}
+                      </td>
                     </tr>
                   )}
-                  {filteredHistoryList.map((item) => (
+                  {view === "history" && filteredHistoryList.map((item) => (
                     <tr
                       key={item.history_id}
                       className={
@@ -886,6 +994,36 @@ export default function Home() {
                     >
                       <td>{item.title || "Cuộc trò chuyện mới"}</td>
                       <td>{formatUpdatedAt(item.updated_at)}</td>
+                      <td className={styles.historyActionCell}>
+                        <button
+                          type="button"
+                          className={styles.historyActionButton}
+                          aria-label={`Xóa ${item.title}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void deleteHistoryFromList(item.history_id);
+                          }}
+                        >
+                          <Icon name="trash" size={15} />
+                          Xóa
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                  {view === "trash" && filteredDeletedHistoryList.map((item) => (
+                    <tr key={item.history_id}>
+                      <td>{item.title || "Cuộc trò chuyện mới"}</td>
+                      <td>{formatUpdatedAt(item.deleted_at)}</td>
+                      <td title={item.user_id}>{item.user_id.slice(0, 8)}…</td>
+                      <td className={styles.historyActionCell}>
+                        <button
+                          type="button"
+                          className={styles.restoreButton}
+                          onClick={() => void restoreHistoryFromTrash(item.history_id)}
+                        >
+                          Khôi phục
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>

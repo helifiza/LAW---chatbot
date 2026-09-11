@@ -42,6 +42,23 @@ class HistoryServiceTests(unittest.TestCase):
         with self.assertRaises(DocumentLimitError):
             service.start_document(history.id, "two.pdf", "application/pdf", 10)
 
+    def test_delete_and_restore_history_keeps_vectors(self) -> None:
+        service = HistoryService(self.repository, self.vectors)
+        history = service.create(self.user["id"], "Test")
+
+        service.delete_history(history.id)
+
+        self.assertEqual(self.vectors.deleted_histories, [])
+        with self.assertRaises(HistoryNotFoundError):
+            service.get_any(history.id)
+        self.assertEqual(
+            [item.id for item in service.list_deleted_histories()], [history.id]
+        )
+
+        restored = service.restore_history(history.id)
+        self.assertEqual(restored.id, history.id)
+        self.assertEqual(service.get_any(history.id).id, history.id)
+
 
 if __name__ == "__main__":
     unittest.main()

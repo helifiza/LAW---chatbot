@@ -129,15 +129,24 @@ class HistoryService:
         if self.repository.get_history(history_id) is None:
             return
 
-        try:
-            self.vector_repository.delete_history(history_id)
-        finally:
-            self.repository.delete_history(history_id)
+        self.repository.soft_delete_history(history_id)
 
         self.logger.info(
-            "Xóa lịch sử | history=%s",
+            "Soft delete lịch sử | history=%s",
             history_id,
         )
+
+    def list_deleted_histories(
+        self, *, limit: int = 100, offset: int = 0
+    ) -> list[HistoryRecord]:
+        return self.repository.list_deleted_histories(limit=limit, offset=offset)
+
+    def restore_history(self, history_id: str) -> HistoryRecord:
+        restored = self.repository.restore_history(history_id)
+        if restored is None:
+            raise HistoryNotFoundError("Không tìm thấy lịch sử đã xóa")
+        self.logger.info("Khôi phục lịch sử | history=%s", history_id)
+        return restored
 
     def add_message(
         self, history_id: str, role: MessageRole | str, content: str

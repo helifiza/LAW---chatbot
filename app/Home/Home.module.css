@@ -570,6 +570,38 @@
   font-weight: 650;
 }
 
+.historyActionCell {
+  width: 1%;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.historyActionButton,
+.restoreButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 1px solid #e3e6ed;
+  border-radius: 9px;
+  background: #fff;
+  color: #5f6673;
+  font: inherit;
+  cursor: pointer;
+}
+
+.historyActionButton:hover {
+  border-color: #f1c5c5;
+  background: #fff5f5;
+  color: #b33a3a;
+}
+
+.restoreButton:hover {
+  border-color: #b9dcc9;
+  background: #f3fbf7;
+  color: #28734f;
+}
+
 .messageScroller {
   min-height: 0;
   flex: 1;

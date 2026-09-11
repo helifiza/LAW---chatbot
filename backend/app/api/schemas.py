@@ -133,6 +133,21 @@ class HistoryOut(BaseModel):
         )
 
 
+class DeletedHistoryOut(HistoryOut):
+    user_id: str
+    deleted_at: datetime
+
+    @classmethod
+    def from_record(cls, value: HistoryRecord) -> "DeletedHistoryOut":
+        if value.deleted_at is None:
+            raise ValueError("History chưa bị xóa")
+        return cls(
+            **HistoryOut.from_record(value).model_dump(),
+            user_id=value.user_id,
+            deleted_at=value.deleted_at,
+        )
+
+
 class HistorySnapshotOut(HistoryOut):
     documents: list[DocumentOut]
     messages: list[MessageOut]

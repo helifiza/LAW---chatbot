@@ -8,7 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routers import auth, chat, documents, health, histories, legal_graph
+from app.api.routers import admin_histories, auth, chat, documents, health, histories, legal_graph
 from app.container import AppContainer, build_container
 from app.core.config import Settings
 from app.core.errors import AppError
@@ -91,6 +91,7 @@ async def unexpected_error_handler(_: Request, exc: Exception) -> JSONResponse:
 
 app.include_router(health.router, prefix=settings.api_prefix)
 app.include_router(histories.router, prefix=settings.api_prefix)
+app.include_router(admin_histories.router, prefix=settings.api_prefix)
 app.include_router(documents.router, prefix=settings.api_prefix)
 app.include_router(chat.router, prefix=settings.api_prefix)
 app.include_router(legal_graph.router, prefix=settings.api_prefix)

@@ -58,6 +58,7 @@ class HistoryRepository:
                     title TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
+                    deleted_at TEXT,
                     FOREIGN KEY(user_id)
                         REFERENCES users(id)
                         ON DELETE CASCADE
@@ -107,11 +108,15 @@ class HistoryRepository:
             for statement in (
                 "ALTER TABLE documents ADD COLUMN graph_status TEXT NOT NULL DEFAULT 'pending'",
                 "ALTER TABLE documents ADD COLUMN graph_error TEXT",
+                "ALTER TABLE history ADD COLUMN deleted_at TEXT",
             ):
                 try:
                     connection.execute(statement)
                 except sqlite3.OperationalError:
                     pass
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_history_deleted_at ON history(deleted_at)"
+            )
 
     @staticmethod
     def _history_from_row(row: sqlite3.Row) -> HistoryRecord:
@@ -122,6 +127,7 @@ class HistoryRepository:
             status=row["status"], 
             created_at=_from_iso(row["created_at"]),
             updated_at=_from_iso(row["updated_at"]),
+            deleted_at=_from_iso(row["deleted_at"]) if row["deleted_at"] else None,
         )
 
     @staticmethod
@@ -179,24 +185,28 @@ class HistoryRepository:
             )
         return history
 
-    def get_history(self, history_id: str) -> HistoryRecord | None:
+    def get_history(
+        self, history_id: str, *, include_deleted: bool = False
+    ) -> HistoryRecord | None:
+        query = "SELECT * FROM history WHERE id = ?"
+        if not include_deleted:
+            query += " AND deleted_at IS NULL"
         with self._connection() as connection:
-            row = connection.execute(
-                "SELECT * FROM history WHERE id = ?", (history_id,)
-            ).fetchone()
+            row = connection.execute(query, (history_id,)).fetchone()
         return self._history_from_row(row) if row else None
 
     def set_history_status(self, history_id: str, status: str) -> HistoryRecord | None:
         now = utc_now()
         with self._connection() as connection:
             connection.execute(
-                "UPDATE history SET status = ?, updated_at = ? WHERE id = ?",
+                """UPDATE history SET status = ?, updated_at = ?
+                   WHERE id = ? AND deleted_at IS NULL""",
                 (status, _to_iso(now), history_id),
             )
         return self.get_history(history_id)
 
     def list_histories_by_user(self, user_id: str, status: str | None = None) -> list[HistoryRecord]:
-        query = "SELECT * FROM history WHERE user_id = ?"
+        query = "SELECT * FROM history WHERE user_id = ? AND deleted_at IS NULL"
         params: list[object] = [user_id]
         if status:
             query += " AND status = ?"
@@ -214,7 +224,7 @@ class HistoryRepository:
                     """
                     UPDATE history
                     SET updated_at = ?, title = ?
-                    WHERE id = ?
+                    WHERE id = ? AND deleted_at IS NULL
                     """,
                     (_to_iso(now), title, history_id),
                 )
@@ -223,18 +233,48 @@ class HistoryRepository:
                     """
                     UPDATE history
                     SET updated_at = ?
-                    WHERE id = ?
+                    WHERE id = ? AND deleted_at IS NULL
                     """,
                     (_to_iso(now), history_id),
                 )
         return self.get_history(history_id)
 
-    def delete_history(self, history_id: str) -> bool:
+    def soft_delete_history(self, history_id: str) -> bool:
+        now = utc_now()
         with self._connection() as connection:
             cursor = connection.execute(
-                "DELETE FROM history WHERE id = ?", (history_id,)
+                """UPDATE history
+                   SET deleted_at = ?, updated_at = ?
+                   WHERE id = ? AND deleted_at IS NULL""",
+                (_to_iso(now), _to_iso(now), history_id),
             )
         return cursor.rowcount > 0
+
+    def list_deleted_histories(
+        self, *, limit: int = 100, offset: int = 0
+    ) -> list[HistoryRecord]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT * FROM history
+                   WHERE deleted_at IS NOT NULL
+                   ORDER BY deleted_at DESC
+                   LIMIT ? OFFSET ?""",
+                (limit, offset),
+            ).fetchall()
+        return [self._history_from_row(row) for row in rows]
+
+    def restore_history(self, history_id: str) -> HistoryRecord | None:
+        now = utc_now()
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """UPDATE history
+                   SET deleted_at = NULL, updated_at = ?
+                   WHERE id = ? AND deleted_at IS NOT NULL""",
+                (_to_iso(now), history_id),
+            )
+        if cursor.rowcount == 0:
+            return None
+        return self.get_history(history_id)
 
     def create_document(
         self,
