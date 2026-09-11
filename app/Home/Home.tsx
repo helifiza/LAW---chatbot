@@ -65,6 +65,18 @@ function storedUser(): StoredUser | null {
   }
 }
 
+function formatDisplayName(value: string): string {
+  const words = value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/g, "d")
+    .replace(/Đ/g, "D")
+    .trim()
+    .split(/\s+/);
+
+  return words.length > 1 ? `${words.at(-1)} ${words[0]}` : words[0];
+}
+
 type MessageSource = { fileName: string; locator: string; excerpt: string };
 type Message = {
   id: string;
@@ -904,7 +916,11 @@ export default function Home() {
                   <Icon name="user" size={19} />
                 </span>
                 <span>
-                  <strong>{currentUser?.full_name ?? "Phiên cục bộ"}</strong>
+                  <strong>
+                    {currentUser
+                      ? formatDisplayName(currentUser.full_name)
+                      : "Phiên cục bộ"}
+                  </strong>
                   <small>
                     {historyId ? `Phiên ${historyId.slice(0, 8)}` : "Đang kết nối"}
                   </small>
