@@ -1,6 +1,8 @@
+import inspect
 import json
 import unittest
 
+from app.clients.gemini_client import GeminiClient
 from app.services.query_router_service import QueryIntent, QueryRouterService
 
 
@@ -11,6 +13,7 @@ class FakeGeminiClient:
         self.request = None
 
     def generate(self, **kwargs):
+        inspect.signature(GeminiClient.generate).bind(self, **kwargs)
         self.request = kwargs
         if self.error is not None:
             raise self.error
@@ -33,6 +36,7 @@ class QueryRouterServiceTests(unittest.TestCase):
             "Tóm tắt Nghị định 123"
         )
 
+        self.assertEqual(result.source, "llm")
         self.assertEqual(result.intent, QueryIntent.DOCUMENT_SUMMARY)
         self.assertEqual(result.target_documents, ["Nghị định 123"])
         self.assertEqual(result.comparison_aspects, ["đối tượng áp dụng", "mức xử phạt"])

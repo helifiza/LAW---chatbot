@@ -277,6 +277,8 @@ class QueryRouterService:
                 model=self.model,
                 prompt=question,
                 system_instruction=_ROUTER_SYSTEM_PROMPT,
+                temperature=0.0,
+                max_output_tokens=1024,
             )
             data = json.loads(_strip_json_fence(raw_response))
 
