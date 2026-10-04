@@ -1,9 +1,12 @@
+import json
 import logging
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from app.domain.legal_document import matches_legal_reference
+from app.domain.models import MessageRole
 from app.repositories.history_repository import HistoryRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.vector_repository import VectorRepository
@@ -11,7 +14,7 @@ from app.services.chunking_service import LegalChunkingService
 from app.services.document_parser import DocumentParser
 from app.services.indexing_service import IndexingService
 from app.services.history_service import HistoryService
-from app.services.query_router_service import QueryRouterService
+from app.services.query_router_service import QueryRouterService, QueryScope
 from app.services.rag_service import (
     RagService,
     ANTI_HALLUCINATION_ANSWER,
@@ -42,6 +45,9 @@ class FakeGenerationService:
         self._answer = answer
 
     def generate(self, question, context, history):
+        return self._answer
+
+    def generate_comparison(self, question, context_by_document, history):
         return self._answer
 
 
@@ -213,6 +219,394 @@ class SpecificRouteTests(RagServiceTestBase):
         answer = rag.ask(self.history.id, "Câu hỏi bất kỳ", 5)
 
         self.assertEqual(answer.answer, NOT_FOUND_ANSWER)
+
+
+class ScopeResolutionTests(RagServiceTestBase):
+    """scope single/selected phải thu hẹp retrieval về văn bản được chỉ định."""
+
+    def test_multi_document_scope_is_unrestricted(self) -> None:
+        rag = self._build_rag_service()
+
+        resolution = rag._resolve_scope(
+            self.history.id, QueryScope.MULTI_DOCUMENT, ["hop_dong"]
+        )
+
+        self.assertIsNone(resolution.document_ids)
+        self.assertEqual(resolution.source, "unrestricted")
+
+    def test_single_document_scope_resolves_target_by_file_name(self) -> None:
+        rag = self._build_rag_service()
+
+        resolution = rag._resolve_scope(
+            self.history.id, QueryScope.SINGLE_DOCUMENT, ["hop_dong"]
+        )
+
+        self.assertEqual(resolution.document_ids, (self.document.id,))
+        self.assertEqual(resolution.source, "targets")
+
+    def test_unresolved_target_returns_not_found_without_retrieval(self) -> None:
+        rag = self._build_rag_service(generation_answer="không nên xuất hiện")
+        calls: list[dict] = []
+
+        class RecordingRetrievalService:
+            def retrieve(self, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(results=[], trace={"warnings": []})
+
+        rag.retrieval_service = RecordingRetrievalService()
+        resolution = rag._resolve_scope(
+            self.history.id, QueryScope.SINGLE_DOCUMENT, ["Nghị định 99/2099"]
+        )
+
+        answer, sources, count, trace = rag._ask_specific(
+            self.history.id, "Điều 1 quy định gì?", 5, scope_resolution=resolution
+        )
+
+        self.assertTrue(resolution.is_unresolved)
+        self.assertIn("Nghị định 99/2099", answer)
+        self.assertEqual((sources, count), ((), 0))
+        self.assertEqual(calls, [])
+        self.assertEqual(trace["scope_resolution"]["unresolved_targets"], ["Nghị định 99/2099"])
+
+    def test_history_reference_uses_documents_from_last_answer(self) -> None:
+        rag = self._build_rag_service()
+        self.histories.add_message(
+            self.history.id,
+            MessageRole.ASSISTANT,
+            "câu trả lời trước",
+            sources=json.dumps([{"document_id": self.document.id}]),
+        )
+
+        resolution = rag._resolve_scope(
+            self.history.id, QueryScope.SINGLE_DOCUMENT, [], requires_history_context=True
+        )
+
+        self.assertEqual(resolution.document_ids, (self.document.id,))
+        self.assertEqual(resolution.source, "history")
+
+    def test_specific_passes_document_ids_to_retrieval(self) -> None:
+        rag = self._build_rag_service(
+            generation_answer="Bên A phải thanh toán đúng hạn. [hop_dong.txt, trang 1]"
+        )
+        calls: list[dict] = []
+        real_retrieval = rag.retrieval_service
+
+        class RecordingRetrievalService:
+            def retrieve(self, **kwargs):
+                calls.append(kwargs)
+                return real_retrieval.retrieve(**kwargs)
+
+        rag.retrieval_service = RecordingRetrievalService()
+        resolution = rag._resolve_scope(
+            self.history.id, QueryScope.SINGLE_DOCUMENT, ["hop_dong"]
+        )
+
+        rag._ask_specific(self.history.id, "Nghĩa vụ là gì?", 5, scope_resolution=resolution)
+
+        self.assertEqual(calls[0]["document_ids"], (self.document.id,))
+
+
+class TwoDocumentTestBase(RagServiceTestBase):
+    def setUp(self) -> None:
+        super().setUp()
+        upload = Path(self._tmp.name) / "quy_che.txt"
+        upload.write_text(
+            "Điều 1: Thời hạn thanh toán\nThanh toán trong 30 ngày.",
+            encoding="utf-8",
+        )
+        self.second_document = self.indexing.index_file(
+            self.history.id, "test-user", upload, "quy_che.txt",
+            "application/pdf", upload.stat().st_size,
+        )
+        self.assertEqual(self.second_document.status, "ready")
+
+
+class CompareScopeTests(TwoDocumentTestBase):
+    """Compare không bao giờ tự so sánh toàn phiên khi thiếu văn bản chỉ định."""
+
+    def _recording_rag(self, generation_answer: str = ""):
+        rag = self._build_rag_service(generation_answer=generation_answer)
+        calls: list[dict] = []
+        real_retrieval = rag.retrieval_service
+
+        class RecordingRetrievalService:
+            def retrieve(self, **kwargs):
+                calls.append(kwargs)
+                return real_retrieval.retrieve(**kwargs)
+
+        rag.retrieval_service = RecordingRetrievalService()
+        return rag, calls
+
+    def test_without_targets_requires_explicit_documents(self) -> None:
+        rag, calls = self._recording_rag()
+
+        answer, sources, _, trace = rag._ask_compare(
+            self.history.id, "So sánh các văn bản", None, 5
+        )
+
+        self.assertTrue(answer.startswith("Cần xác định ít nhất hai văn bản"))
+        self.assertEqual(sources, ())
+        self.assertEqual(calls, [])
+        self.assertEqual(trace["scope_resolution"]["document_ids"], [])
+
+    def test_reports_unresolved_target(self) -> None:
+        rag, calls = self._recording_rag()
+
+        answer, _, _, trace = rag._ask_compare(
+            self.history.id, "So sánh", ["hop_dong", "Luật 99/2099"], 5
+        )
+
+        self.assertIn("Luật 99/2099", answer)
+        self.assertEqual(calls, [])
+        self.assertEqual(trace["scope_resolution"]["unresolved_targets"], ["Luật 99/2099"])
+
+    def test_targets_limit_retrieval_to_each_document(self) -> None:
+        rag, calls = self._recording_rag(
+            "Hợp đồng [hop_dong.txt, trang 1] khác quy chế [quy_che.txt, trang 1]"
+        )
+
+        _, _, _, trace = rag._ask_compare(
+            self.history.id, "So sánh thanh toán", ["hop_dong", "quy_che"], 5
+        )
+
+        self.assertEqual(
+            [call["document_ids"] for call in calls],
+            [[self.document.id], [self.second_document.id]],
+        )
+        self.assertEqual(
+            trace["scope_resolution"]["document_ids"],
+            [self.document.id, self.second_document.id],
+        )
+
+    def test_history_reference_uses_documents_from_last_answer(self) -> None:
+        rag, calls = self._recording_rag()
+        self.histories.add_message(
+            self.history.id,
+            MessageRole.ASSISTANT,
+            "câu trả lời trước",
+            sources=json.dumps([
+                {"document_id": self.document.id},
+                {"document_id": self.second_document.id},
+            ]),
+        )
+
+        _, _, _, trace = rag._ask_compare(
+            self.history.id, "So sánh 2 văn bản trên", None, 5,
+            requires_history_context=True,
+        )
+
+        self.assertEqual(trace["scope_resolution"]["source"], "history")
+        self.assertEqual(len(calls), 2)
+
+
+class RecordingSummarizeService:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def run(self, history_id, question, target_documents=None,
+            full_enumeration=False, document_type_filter=None, document_ids=None):
+        self.calls.append({"target_documents": target_documents, "document_ids": document_ids})
+        return SimpleNamespace(
+            answer="Không tìm thấy nội dung liên quan.",
+            sources=(),
+            scope_document_ids=tuple(document_ids or ()),
+        )
+
+
+class SummaryScopeTests(TwoDocumentTestBase):
+    """Summary phải được chỉ rõ văn bản, không mặc định tóm tắt toàn phiên."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.summarizer = RecordingSummarizeService()
+        self.rag = self._build_rag_service(summarize_service=self.summarizer)
+
+    def test_without_target_requires_explicit_document(self) -> None:
+        answer, _, _, trace = self.rag._ask_summary(self.history.id, "Tóm tắt nội dung")
+
+        self.assertIn("nêu rõ", answer)
+        self.assertEqual(self.summarizer.calls, [])
+        self.assertEqual(trace["scope_resolution"]["source"], "unspecified")
+
+    def test_unresolved_target_returns_not_found(self) -> None:
+        answer, _, _, _ = self.rag._ask_summary(
+            self.history.id, "Tóm tắt Luật 99/2099", ["Luật 99/2099"]
+        )
+
+        self.assertIn("Luật 99/2099", answer)
+        self.assertEqual(self.summarizer.calls, [])
+
+    def test_target_passes_resolved_document_ids(self) -> None:
+        self.rag._ask_summary(self.history.id, "Tóm tắt quy chế", ["quy_che"])
+
+        self.assertEqual(self.summarizer.calls[0]["document_ids"], (self.second_document.id,))
+
+    def test_file_name_in_question_is_explicit(self) -> None:
+        self.rag._ask_summary(self.history.id, "Tóm tắt hop_dong giúp tôi")
+
+        self.assertEqual(self.summarizer.calls[0]["document_ids"], (self.document.id,))
+
+    def test_history_reference_uses_documents_from_last_answer(self) -> None:
+        self.histories.add_message(
+            self.history.id, MessageRole.ASSISTANT, "trả lời trước",
+            sources=json.dumps([{"document_id": self.second_document.id}]),
+        )
+
+        self.rag._ask_summary(
+            self.history.id, "Tóm tắt văn bản trên", requires_history_context=True
+        )
+
+        self.assertEqual(self.summarizer.calls[0]["document_ids"], (self.second_document.id,))
+
+
+class LegalReferenceMatchTests(unittest.TestCase):
+    def test_reference_with_document_type_matches_number(self) -> None:
+        self.assertTrue(matches_legal_reference("Nghị định 15/2020/NĐ-CP", "15/2020/NĐ-CP"))
+
+    def test_partial_number_and_unaccented_reference_match(self) -> None:
+        self.assertTrue(matches_legal_reference("15/2020", "15/2020/NĐ-CP"))
+        self.assertTrue(matches_legal_reference("nghi dinh 15/2020/ND-CP", "15/2020/NĐ-CP"))
+
+    def test_token_boundary_prevents_false_match(self) -> None:
+        self.assertFalse(matches_legal_reference("Nghị định 115/2020/NĐ-CP", "15/2020/NĐ-CP"))
+
+    def test_short_number_is_not_matched_in_reverse(self) -> None:
+        self.assertFalse(matches_legal_reference("Nghị định 15/2020/NĐ-CP", "15"))
+
+
+class FakeLegalGraphRepository:
+    def __init__(self, documents, relations) -> None:
+        self._documents = documents
+        self._relations = relations
+
+    def list_documents(self, history_id):
+        return self._documents
+
+    def list_relation_details(self, history_id, document_type_filter=None):
+        return list(self._relations)
+
+
+class GraphTestBase(TwoDocumentTestBase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.rag = self._build_rag_service()
+        self.rag.legal_graph_repository = FakeLegalGraphRepository(
+            documents=[
+                {"id": "lg-1", "upload_document_id": self.document.id,
+                 "document_number": "15/2020/NĐ-CP", "title": "", "document_type": "Nghị định"},
+                {"id": "lg-2", "upload_document_id": self.second_document.id,
+                 "document_number": "01/2021/TT-BTC", "title": "", "document_type": "Thông tư"},
+            ],
+            relations=[{
+                "upload_document_id": self.second_document.id,
+                "source_file_name": "quy_che.txt",
+                "source_document_id": "lg-2", "target_document_id": "lg-1",
+                "source_number": "01/2021/TT-BTC", "target_number": "15/2020/NĐ-CP",
+                "raw_target_reference": "Nghị định 15/2020/NĐ-CP",
+                "relation_type": "HUONG_DAN_THI_HANH",
+                "page_number": 1, "page_end_number": 1,
+                "confidence": 0.9, "quote": "hướng dẫn thi hành Nghị định 15/2020/NĐ-CP",
+            }],
+        )
+
+
+class RelationshipScopeTests(GraphTestBase):
+    def test_target_with_document_type_finds_relation(self) -> None:
+        answer, sources, _, trace = self.rag._ask_relationship(
+            self.history.id, "quan hệ", ["Nghị định 15/2020/NĐ-CP"]
+        )
+
+        self.assertEqual(len(sources), 1)
+        self.assertIn("hướng dẫn thi hành", answer)
+        self.assertEqual(trace["scope_resolution"]["unresolved_targets"], [])
+
+    def test_single_document_scope_without_target_requires_explicit_document(self) -> None:
+        answer, sources, _, _ = self.rag._ask_relationship(
+            self.history.id, "quan hệ", None, scope=QueryScope.SINGLE_DOCUMENT
+        )
+
+        self.assertIn("nêu rõ", answer)
+        self.assertEqual(sources, ())
+
+    def test_multi_document_scope_without_target_lists_all(self) -> None:
+        _, sources, _, _ = self.rag._ask_relationship(
+            self.history.id, "quan hệ", None, scope=QueryScope.MULTI_DOCUMENT
+        )
+
+        self.assertEqual(len(sources), 1)
+
+    def test_history_reference_filters_by_either_side(self) -> None:
+        self.histories.add_message(
+            self.history.id, MessageRole.ASSISTANT, "trả lời trước",
+            sources=json.dumps([{"document_id": self.document.id}]),
+        )
+
+        _, sources, _, trace = self.rag._ask_relationship(
+            self.history.id, "văn bản trên được hướng dẫn bởi gì?", None,
+            scope=QueryScope.SINGLE_DOCUMENT, requires_history_context=True,
+        )
+
+        self.assertEqual(len(sources), 1)  # văn bản trước là đầu đích của quan hệ
+        self.assertEqual(trace["scope_resolution"]["source"], "history")
+
+
+class RecordingEffectService:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def evaluate(self, history_id, targets, as_of, document_type_filter=None):
+        self.calls.append(list(targets))
+        return {"answer": "Văn bản còn hiệu lực.", "sources": [],
+                "status": "EFFECTIVE", "warnings": []}
+
+
+class CurrentEffectScopeTests(GraphTestBase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.effect = RecordingEffectService()
+        self.rag.legal_effect_service = self.effect
+
+    def test_targets_are_passed_through(self) -> None:
+        self.rag._ask_current_effect(self.history.id, ["Nghị định 15/2020/NĐ-CP"], None)
+
+        self.assertEqual(self.effect.calls, [["Nghị định 15/2020/NĐ-CP"]])
+
+    def test_history_reference_resolves_to_document_number(self) -> None:
+        self.histories.add_message(
+            self.history.id, MessageRole.ASSISTANT, "trả lời trước",
+            sources=json.dumps([{"document_id": self.document.id}]),
+        )
+
+        _, _, _, trace = self.rag._ask_current_effect(
+            self.history.id, [], None, requires_history_context=True
+        )
+
+        self.assertEqual(self.effect.calls, [["15/2020/NĐ-CP"]])
+        self.assertEqual(trace["scope_resolution"]["source"], "history")
+
+    def test_history_reference_with_many_documents_requires_explicit(self) -> None:
+        self.histories.add_message(
+            self.history.id, MessageRole.ASSISTANT, "trả lời trước",
+            sources=json.dumps([
+                {"document_id": self.document.id},
+                {"document_id": self.second_document.id},
+            ]),
+        )
+
+        answer, _, _, _ = self.rag._ask_current_effect(
+            self.history.id, [], None, requires_history_context=True
+        )
+
+        self.assertIn("nêu rõ", answer)
+        self.assertEqual(self.effect.calls, [])
+
+    def test_multi_document_scope_without_target_requires_explicit(self) -> None:
+        answer, _, _, _ = self.rag._ask_current_effect(
+            self.history.id, [], None, scope=QueryScope.ALL_MATCHING
+        )
+
+        self.assertIn("nêu rõ", answer)
+        self.assertEqual(self.effect.calls, [])
 
 
 class SummaryRouteBugFixTests(RagServiceTestBase):

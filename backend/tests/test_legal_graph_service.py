@@ -131,6 +131,13 @@ class LegalGraphServiceTests(unittest.TestCase):
             )],
             [uploaded["id"]],
         )
+        # Router thường trích nguyên văn kèm loại văn bản -> vẫn phải khớp số hiệu.
+        self.assertEqual(
+            [item["id"] for item in self.graph.find_canonical_documents(
+                self.history.id, ["Nghị định 50/2026/NĐ-CP"]
+            )],
+            [uploaded["id"]],
+        )
 
     def test_rejects_relation_when_quote_is_not_in_chunk(self) -> None:
         service = LegalGraphService(self.graph, FakeGeminiClient(self._payload("Câu do model tự tạo")), "test")

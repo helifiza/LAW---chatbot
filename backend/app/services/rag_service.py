@@ -17,11 +17,16 @@ from app.services.generation_service import GenerationService, GroundedClaim
 from app.services.hybrid_retrieval_service import HybridRetrievalService
 from app.services.query_rewrite_service import QueryRewriteService
 from app.services.history_service import HistoryService
-from app.services.query_router_service import QueryCoverage, QueryIntent, QueryRouterService
+from app.services.query_router_service import (
+    QueryCoverage,
+    QueryIntent,
+    QueryRouterService,
+    QueryScope,
+)
 from app.services.summary_service import SummarizeService
 from app.repositories.legal_graph_repository import LegalGraphRepository
 from app.services.legal_effect_service import LegalEffectService
-from app.domain.legal_document import normalize_document_type_filter
+from app.domain.legal_document import matches_legal_reference, normalize_document_type_filter
 
 try:
     from rapidfuzz import fuzz
@@ -117,6 +122,40 @@ class RagAnswer:
     sources: tuple[RagSource, ...]
     retrieved_count: int
     trace: dict[str, object] | None = None
+
+
+# Các scope mà router khẳng định câu hỏi chỉ nhắm vào văn bản cụ thể -> phải
+# thu hẹp retrieval. multi_document/all_matching/unknown giữ tìm toàn phiên.
+_DOCUMENT_BOUND_SCOPES = frozenset(
+    {QueryScope.SINGLE_DOCUMENT, QueryScope.SELECTED_DOCUMENTS}
+)
+
+
+@dataclass(frozen=True)
+class ScopeResolution:
+    """Kết quả quy đổi scope của router thành tập upload document_id.
+
+    - document_ids = None: không giới hạn (tìm toàn phiên).
+    - document_ids = (): người dùng chỉ định văn bản nhưng không resolve được
+      -> caller phải báo không tìm thấy, không được tự mở rộng phạm vi.
+    """
+
+    document_ids: tuple[str, ...] | None
+    # "targets" | "history" | "unrestricted"; riêng summary còn có
+    # "question_file_name" | "only_document" | "unspecified" | "no_documents".
+    source: str
+    unresolved_targets: tuple[str, ...] = ()
+
+    @property
+    def is_unresolved(self) -> bool:
+        return self.document_ids == ()
+
+    def to_trace(self) -> dict[str, object]:
+        return {
+            "source": self.source,
+            "document_ids": list(self.document_ids) if self.document_ids is not None else None,
+            "unresolved_targets": list(self.unresolved_targets),
+        }
 
 
 class RagService:
@@ -389,6 +428,119 @@ class RagService:
         }
 
     # ------------------------------------------------------------------
+    # Scope resolution
+    # ------------------------------------------------------------------
+
+    def _ready_documents(
+        self,
+        history_id: str,
+        document_type_filter: Sequence[str] | None = None,
+    ) -> list:
+        documents = [
+            document for document in self.history_repository.list_documents(history_id)
+            if document.status == DocumentStatus.READY.value
+        ]
+        normalized_types = normalize_document_type_filter(document_type_filter)
+        if not normalized_types:
+            return documents
+        if self.legal_graph_repository is None:
+            return []
+        allowed_upload_ids = self.legal_graph_repository.list_upload_document_ids_by_types(
+            history_id, normalized_types
+        )
+        return [document for document in documents if document.id in allowed_upload_ids]
+
+    def _match_target_documents(
+        self,
+        history_id: str,
+        documents: Sequence,
+        target_documents: Sequence[str],
+    ) -> list:
+        """Khớp tên/số hiệu văn bản router trích ra với upload document:
+        qua graph (số hiệu/tiêu đề/loại) hoặc qua tên file."""
+        graph_upload_ids: set[str] = set()
+        if self.legal_graph_repository is not None:
+            for legal_document in self.legal_graph_repository.list_documents(history_id):
+                upload_id = legal_document.get("upload_document_id")
+                if upload_id and any(
+                    matches_legal_reference(
+                        ref,
+                        legal_document.get("document_number"),
+                        legal_document.get("title"),
+                        legal_document.get("document_type"),
+                    )
+                    for ref in target_documents
+                ):
+                    graph_upload_ids.add(str(upload_id))
+        return [
+            document for document in documents
+            if document.id in graph_upload_ids or any(
+                _normalize_filename(ref) in _normalize_filename(document.file_name)
+                or _normalize_filename(document.file_name) in _normalize_filename(ref)
+                for ref in target_documents
+            )
+        ]
+
+    def _document_ids_from_last_answer(
+        self, history_id: str, ready_ids: set[str]
+    ) -> tuple[str, ...]:
+        """document_id trong sources của câu trả lời gần nhất có nguồn — dùng
+        cho tham chiếu ngầm kiểu "văn bản trên"."""
+        records = self.history_repository.list_messages(history_id, limit=self.history_limit)
+        for record in reversed(records):
+            if record.role != MessageRole.ASSISTANT.value or not record.sources:
+                continue
+            try:
+                stored = json.loads(record.sources)
+            except (TypeError, ValueError):
+                continue
+            ids = tuple(dict.fromkeys(
+                str(item["document_id"]) for item in stored
+                if isinstance(item, dict) and str(item.get("document_id")) in ready_ids
+            ))
+            if ids:
+                return ids
+        return ()
+
+    def _resolve_scope(
+        self,
+        history_id: str,
+        scope: QueryScope,
+        target_documents: Sequence[str] | None,
+        requires_history_context: bool = False,
+        document_type_filter: Sequence[str] | None = None,
+    ) -> ScopeResolution:
+        if scope not in _DOCUMENT_BOUND_SCOPES:
+            return ScopeResolution(document_ids=None, source="unrestricted")
+        documents = self._ready_documents(history_id, document_type_filter)
+        if target_documents:
+            matched = self._match_target_documents(history_id, documents, target_documents)
+            return ScopeResolution(
+                document_ids=tuple(document.id for document in matched),
+                source="targets",
+                unresolved_targets=() if matched else tuple(target_documents),
+            )
+        if requires_history_context:
+            ids = self._document_ids_from_last_answer(
+                history_id, {document.id for document in documents}
+            )
+            if ids:
+                return ScopeResolution(document_ids=ids, source="history")
+        return ScopeResolution(document_ids=None, source="unrestricted")
+
+    @staticmethod
+    def _unresolved_scope_answer(
+        resolution: ScopeResolution,
+    ) -> tuple[str, tuple[RagSource, ...], int, dict[str, object]]:
+        targets = ", ".join(resolution.unresolved_targets)
+        return (
+            f"Không tìm thấy văn bản {targets} trong các tài liệu đã tải lên của phiên.",
+            (), 0,
+            {"scope_resolution": resolution.to_trace(),
+             "warnings": ["Không resolve được văn bản người dùng chỉ định."]},
+        )
+
+    # ------------------------------------------------------------------
     # Main entrypoint
     # ------------------------------------------------------------------
     def _ask_specific(
@@ -398,7 +550,11 @@ class RagService:
         top_k: int,
         linh_vuc_filter: Sequence[str] | None = None,
         document_type_filter: Sequence[str] | None = None,
+        scope_resolution: ScopeResolution | None = None,
     ) -> tuple[str, tuple[RagSource, ...], int, dict[str, object]]:
+        if scope_resolution is not None and scope_resolution.is_unresolved:
+            return self._unresolved_scope_answer(scope_resolution)
+        document_ids = scope_resolution.document_ids if scope_resolution else None
         history_records = self.history_repository.list_messages(
             history_id, limit=self.history_limit
         )
@@ -413,6 +569,7 @@ class RagService:
             original_query=question,
             dense_query=rewrite.retrieval_query,
             top_k=max(top_k * 2, top_k),
+            document_ids=document_ids,
             linh_vuc_filter=linh_vuc_filter,
             document_type_filter=document_type_filter,
         )
@@ -422,6 +579,7 @@ class RagService:
         # phân loại sai câu hỏi, hoặc document bị phân loại sai lúc index),
         # thử lại KHÔNG lọc thay vì trả NOT_FOUND oan — lọc lĩnh vực chỉ nên
         # thu hẹp phạm vi tìm kiếm, không được phép loại bỏ câu trả lời đúng.
+        # Giới hạn theo scope (document_ids) vẫn giữ nguyên khi fallback.
         applied_linh_vuc_fallback = False
         if not results and linh_vuc_filter:
             retrieval = self.retrieval_service.retrieve(
@@ -429,6 +587,7 @@ class RagService:
                 original_query=question,
                 dense_query=rewrite.retrieval_query,
                 top_k=max(top_k * 2, top_k),
+                document_ids=document_ids,
                 document_type_filter=document_type_filter,
             )
             results = self._deduplicate(retrieval.results, top_k)
@@ -492,6 +651,8 @@ class RagService:
         }
         if citation_validation is not None:
             branch_trace["citation_validation"] = citation_validation
+        if scope_resolution is not None:
+            branch_trace["scope_resolution"] = scope_resolution.to_trace()
 
         return answer, sources, len(results), branch_trace
     def _ask_summary(
@@ -499,16 +660,39 @@ class RagService:
             history_id: str,
             question: str,
             target_documents: Sequence[str] | None = None,
-            coverage: QueryCoverage = QueryCoverage.MULTI_ASPECT,
+            coverage: QueryCoverage = QueryCoverage.MULTI_ASPECT,#độ bao phủ nhiều khía cạnh
             document_type_filter: Sequence[str] | None = None,
+            requires_history_context: bool = False,
     )-> tuple[str, tuple[RagSource, ...], int, dict[str, object]]:
+        resolution = self._resolve_summary_scope(
+            history_id, question, target_documents,
+            requires_history_context, document_type_filter,
+        )
+        if resolution.is_unresolved:
+            if resolution.unresolved_targets:
+                return self._unresolved_scope_answer(resolution)
+            # Không chỉ định văn bản mà phiên có nhiều văn bản: không tự tóm
+            # tắt toàn phiên (map-reduce trên mọi chunk), yêu cầu chỉ rõ.
+            message = (
+                "Không có văn bản nào trong phiên khớp loại văn bản được hỏi."
+                if resolution.source == "no_documents"
+                else "Phiên có nhiều văn bản, hãy nêu rõ tên hoặc số hiệu văn bản cần tóm tắt."
+            )
+            return (
+                message,
+                (), 0,
+                {"scope_resolution": resolution.to_trace(),
+                 "warnings": ["Không xác định được văn bản cần tóm tắt."]},
+            )
         run_parameters = inspect.signature(self.summarize_service.run).parameters
         run_kwargs: dict[str, object] = {"target_documents": target_documents}
         if "full_enumeration" in run_parameters:
-            
+
             run_kwargs["full_enumeration"] = coverage == QueryCoverage.FULL_ENUMERATION
         if "document_type_filter" in run_parameters:
             run_kwargs["document_type_filter"] = document_type_filter
+        if "document_ids" in run_parameters:
+            run_kwargs["document_ids"] = resolution.document_ids
         summary_result = self.summarize_service.run(history_id, question, **run_kwargs)
         raw_answer = summary_result.answer
         sources = tuple(
@@ -534,6 +718,7 @@ class RagService:
  
         branch_trace: dict[str, object] = {
             "summary_scope": summary_result.scope_document_ids,
+            "scope_resolution": resolution.to_trace(),
             "citation_validation": citation_validation,
             "coverage": {
                 "documents_considered": len(summary_result.scope_document_ids),
@@ -546,6 +731,44 @@ class RagService:
         }
         return answer, sources, len(sources), branch_trace
 
+    def _resolve_summary_scope(
+        self,
+        history_id: str,
+        question: str,
+        target_documents: Sequence[str] | None,
+        requires_history_context: bool,
+        document_type_filter: Sequence[str] | None,
+    ) -> ScopeResolution:
+        """Văn bản cần tóm tắt phải được chỉ rõ: theo target, theo câu trả lời
+        trước, theo tên file nêu nguyên văn trong câu hỏi, hoặc phiên chỉ có
+        đúng 1 văn bản. Không bao giờ mặc định toàn phiên."""
+        documents = self._ready_documents(history_id, document_type_filter)
+        if not documents:
+            return ScopeResolution(document_ids=(), source="no_documents")
+        if target_documents:
+            matched = self._match_target_documents(history_id, documents, target_documents)
+            return ScopeResolution(
+                document_ids=tuple(document.id for document in matched),
+                source="targets",
+                unresolved_targets=() if matched else tuple(target_documents),
+            )
+        if requires_history_context:
+            ids = self._document_ids_from_last_answer(
+                history_id, {document.id for document in documents}
+            )
+            if ids:
+                return ScopeResolution(document_ids=ids, source="history")
+        lowered_question = question.lower()
+        named = tuple(
+            document.id for document in documents
+            if document.file_name.lower().rsplit(".", 1)[0] in lowered_question
+        )
+        if named:
+            return ScopeResolution(document_ids=named, source="question_file_name")
+        if len(documents) == 1:
+            return ScopeResolution(document_ids=(documents[0].id,), source="only_document")
+        return ScopeResolution(document_ids=(), source="unspecified")
+
     def _ask_compare(
         self,
         history_id: str,
@@ -554,51 +777,49 @@ class RagService:
         top_k: int,
         comparison_aspects: Sequence[str] | None = None,
         document_type_filter: Sequence[str] | None = None,
+        requires_history_context: bool = False,
     ) -> tuple[str, tuple[RagSource, ...], int, dict[str, object]]:
-        documents = [
-            document for document in self.history_repository.list_documents(history_id)
-            if document.status == DocumentStatus.READY.value
-        ]
         normalized_types = normalize_document_type_filter(document_type_filter)
-        if normalized_types:
-            if self.legal_graph_repository is None:
-                documents = []
-            else:
-                allowed_upload_ids = self.legal_graph_repository.list_upload_document_ids_by_types(
-                    history_id, normalized_types
-                )
-                documents = [
-                    document for document in documents
-                    if document.id in allowed_upload_ids
-                ]
-        selected = documents
+        documents = self._ready_documents(history_id, normalized_types)
+        # Không bao giờ tự so sánh toàn phiên: văn bản phải được chỉ định rõ
+        # (target_documents) hoặc lấy từ câu trả lời trước khi tham chiếu ngầm.
+        selected: list = []
+        unresolved_targets: list[str] = []
+        scope_source = "targets"
         if target_documents:
-            graph_upload_ids: set[str] = set()
-            if self.legal_graph_repository is not None:
-                for legal_document in self.legal_graph_repository.list_documents(history_id):
-                    upload_id = legal_document.get("upload_document_id")
-                    searchable = " ".join(
-                        str(legal_document.get(field) or "")
-                        for field in ("document_number", "title", "document_type")
-                    )
-                    if upload_id and any(
-                        _normalize_filename(ref) in _normalize_filename(searchable)
-                        for ref in target_documents
-                    ):
-                        graph_upload_ids.add(str(upload_id))
-            selected = [
-                document for document in documents
-                if document.id in graph_upload_ids or any(
-                    _normalize_filename(ref) in _normalize_filename(document.file_name)
-                    or _normalize_filename(document.file_name) in _normalize_filename(ref)
-                    for ref in target_documents
-                )
-            ]
+            selected_ids: set[str] = set()
+            for ref in target_documents:
+                matched = self._match_target_documents(history_id, documents, [ref])
+                if not matched:
+                    unresolved_targets.append(ref)
+                for document in matched:
+                    if document.id not in selected_ids:
+                        selected_ids.add(document.id)
+                        selected.append(document)
+        elif requires_history_context:
+            scope_source = "history"
+            history_ids = self._document_ids_from_last_answer(
+                history_id, {document.id for document in documents}
+            )
+            selected = [document for document in documents if document.id in history_ids]
+        scope_trace = {
+            "source": scope_source,
+            "document_ids": [document.id for document in selected],
+            "unresolved_targets": unresolved_targets,
+        }
         if len(selected) < 2:
+            message = "Cần xác định ít nhất hai văn bản đã tải lên để so sánh."
+            if unresolved_targets:
+                message += (
+                    f" Không tìm thấy văn bản {', '.join(unresolved_targets)} "
+                    "trong các tài liệu đã tải lên của phiên."
+                )
             return (
-                "Cần xác định ít nhất hai văn bản đã tải lên để so sánh.",
+                message,
                 (), 0,
-                {"warnings": ["Không resolve được ít nhất hai văn bản."], "coverage": {"documents_considered": len(selected)}},
+                {"warnings": ["Không resolve được ít nhất hai văn bản."],
+                 "scope_resolution": scope_trace,
+                 "coverage": {"documents_considered": len(selected)}},
             )
         history_records = self.history_repository.list_messages(history_id, limit=self.history_limit)
         history = [(message.role, message.content) for message in history_records]
@@ -645,8 +866,14 @@ class RagService:
             )
         validation = self._validate_citations(raw_answer, sources, comparison_claims)
         answer = raw_answer if validation["has_valid_citation"] else ANTI_HALLUCINATION_ANSWER
+        warnings = (
+            [f"Không resolve được văn bản: {', '.join(unresolved_targets)}"]
+            if unresolved_targets else []
+        )
         return answer, sources, len(all_results), {
             "citation_validation": validation,
+            "scope_resolution": scope_trace,
+            "warnings": warnings,
             "coverage": {
                 "documents_considered": len(selected),
                 "documents_matched": len({source.document_id for source in sources}),
@@ -662,9 +889,39 @@ class RagService:
         targets: Sequence[str],
         as_of_date: str | None,
         document_type_filter: Sequence[str] | None = None,
+        scope: QueryScope = QueryScope.UNKNOWN,
+        requires_history_context: bool = False,
     ) -> tuple[str, tuple[RagSource, ...], int, dict[str, object]]:
         if self.legal_effect_service is None:
             return "Chưa cấu hình bộ kiểm tra hiệu lực.", (), 0, {"warnings": ["effect_service_missing"]}
+        need_explicit = (
+            "Hãy nêu rõ số hiệu văn bản cần kiểm tra hiệu lực.", (), 0,
+        )
+        scope_trace: dict[str, object] = {"source": "targets", "targets": list(targets)}
+        if not targets and requires_history_context and self.legal_graph_repository is not None:
+            # "văn bản trên còn hiệu lực không?" -> quy đổi văn bản ở câu trả
+            # lời trước sang số hiệu trong graph để evaluate.
+            history_ids = self._document_ids_from_last_answer(
+                history_id, {document.id for document in self._ready_documents(history_id)}
+            )
+            numbers = list(dict.fromkeys(
+                str(document.get("document_number"))
+                for document in self.legal_graph_repository.list_documents(history_id)
+                if str(document.get("upload_document_id")) in history_ids
+                and document.get("document_number")
+            ))
+            scope_trace = {"source": "history", "targets": numbers}
+            if len(numbers) != 1:
+                return *need_explicit, {
+                    "scope_resolution": scope_trace,
+                    "warnings": [f"Câu trả lời trước có {len(numbers)} văn bản có số hiệu."],
+                }
+            targets = numbers
+        elif not targets and scope in (QueryScope.MULTI_DOCUMENT, QueryScope.ALL_MATCHING):
+            return *need_explicit, {
+                "scope_resolution": {"source": "unspecified", "targets": []},
+                "warnings": ["Kiểm tra hiệu lực chỉ hỗ trợ một văn bản mỗi lần."],
+            }
         result = self.legal_effect_service.evaluate(
             history_id, targets, as_of_date, document_type_filter
         )
@@ -675,6 +932,7 @@ class RagService:
         return result["answer"], sources, len(sources), {
             "effect_status": result["status"], "warnings": result["warnings"],
             "citation_validation": validation,
+            "scope_resolution": scope_trace,
         }
 
     def _ask_relationship(
@@ -683,6 +941,8 @@ class RagService:
         question: str,
         target_documents: Sequence[str] | None,
         document_type_filter: Sequence[str] | None = None,
+        scope: QueryScope = QueryScope.UNKNOWN,
+        requires_history_context: bool = False,
     ) -> tuple[str, tuple[RagSource, ...], int, dict[str, object]]:
         if self.legal_graph_repository is None:
             return self._ask_specific(
@@ -694,18 +954,59 @@ class RagService:
         details = self.legal_graph_repository.list_relation_details(
             history_id, document_type_filter
         )
+        scope_trace: dict[str, object] = {
+            "source": "unrestricted", "document_ids": None, "unresolved_targets": [],
+        }
+        history_ids: tuple[str, ...] = ()
+        if not target_documents and requires_history_context:
+            history_ids = self._document_ids_from_last_answer(
+                history_id, {document.id for document in self._ready_documents(history_id)}
+            )
         if target_documents:
-            normalized_targets = [_normalize_filename(value) for value in target_documents]
+            def involves(target: str, item: dict) -> bool:
+                return (
+                    matches_legal_reference(target, item.get("source_number"))
+                    or matches_legal_reference(target, item.get("target_number"))
+                )
+
             details = [
                 item for item in details
-                if any(
-                    target in _normalize_filename(str(item.get("source_number") or ""))
-                    or target in _normalize_filename(str(item.get("target_number") or ""))
-                    for target in normalized_targets
-                )
+                if any(involves(target, item) for target in target_documents)
             ]
+            scope_trace = {
+                "source": "targets", "document_ids": None,
+                "unresolved_targets": [
+                    target for target in target_documents
+                    if not any(involves(target, item) for item in details)
+                ],
+            }
+        elif history_ids:
+            # Quan hệ mà văn bản ở câu trả lời trước đứng ở đầu nguồn hoặc đầu đích.
+            upload_by_legal_id = {
+                str(document["id"]): str(document.get("upload_document_id") or "")
+                for document in self.legal_graph_repository.list_documents(history_id)
+            }
+            details = [
+                item for item in details
+                if upload_by_legal_id.get(str(item.get("source_document_id"))) in history_ids
+                or upload_by_legal_id.get(str(item.get("target_document_id"))) in history_ids
+            ]
+            scope_trace = {
+                "source": "history", "document_ids": list(history_ids), "unresolved_targets": [],
+            }
+        elif scope in _DOCUMENT_BOUND_SCOPES:
+            return (
+                "Hãy nêu rõ tên hoặc số hiệu văn bản cần tra cứu quan hệ.",
+                (), 0,
+                {"scope_resolution": {**scope_trace, "source": "unspecified"},
+                 "warnings": ["Không xác định được văn bản cần tra cứu quan hệ."],
+                 "coverage": {"relations": 0}},
+            )
         if not details:
-            return "Không tìm thấy quan hệ có chứng cứ trong các tài liệu đã tải lên.", (), 0, {"coverage": {"relations": 0}}
+            return (
+                "Không tìm thấy quan hệ có chứng cứ trong các tài liệu đã tải lên.", (), 0,
+                {"scope_resolution": scope_trace, "coverage": {"relations": 0}},
+            )
         relation_labels = {
             "SUA_DOI": "sửa đổi", "BO_SUNG": "bổ sung", "SUA_DOI_BO_SUNG": "sửa đổi, bổ sung",
             "BAI_BO": "bãi bỏ", "BAI_BO_MOT_PHAN": "bãi bỏ một phần",
@@ -735,7 +1036,8 @@ class RagService:
         answer = "\n".join(f"- {line}" for line in lines)
         validation = self._validate_citations(answer, sources, trusted_evidence=True)
         return answer, sources, len(details), {
-            "coverage": {"relations": len(details)}, "citation_validation": validation
+            "coverage": {"relations": len(details)}, "citation_validation": validation,
+            "scope_resolution": scope_trace,
         }
 
     def ask(
@@ -765,32 +1067,44 @@ class RagService:
             answer, sources, retrieved_count, branch_trace = self._ask_summary(
                 history_id, question, route_result.target_documents, route_result.coverage,
                 route_result.loai_van_ban_filter,
+                route_result.requires_history_context,
             )
         elif route_result.intent == QueryIntent.COMPARE:
             answer, sources, retrieved_count, branch_trace = self._ask_compare(
                 history_id, question, route_result.target_documents, top_k,
                 route_result.comparison_aspects,
                 route_result.loai_van_ban_filter,
+                route_result.requires_history_context,
             )
         elif route_result.intent == QueryIntent.RELATIONSHIP:
             answer, sources, retrieved_count, branch_trace = self._ask_relationship(
                 history_id, question, route_result.target_documents,
                 route_result.loai_van_ban_filter,
+                route_result.scope,
+                route_result.requires_history_context,
             )
         elif route_result.intent == QueryIntent.CURRENT_EFFECT_CHECK:
             answer, sources, retrieved_count, branch_trace = self._ask_current_effect(
                 history_id, route_result.target_documents, route_result.as_of_date,
                 route_result.loai_van_ban_filter,
+                route_result.scope,
+                route_result.requires_history_context,
             )
         else:
-            # fact_lookup, current_effect_check: chỉ 2 nhánh này dùng linh_vuc
-            # để thu hẹp phạm vi retrieval.
+            # fact_lookup: nhánh duy nhất dùng linh_vuc để thu hẹp retrieval.
             answer, sources, retrieved_count, branch_trace = self._ask_specific(
                 history_id,
                 question,
                 top_k,
                 linh_vuc_filter=route_result.linh_vuc or None,
                 document_type_filter=route_result.loai_van_ban_filter or None,
+                scope_resolution=self._resolve_scope(
+                    history_id,
+                    route_result.scope,
+                    route_result.target_documents,
+                    route_result.requires_history_context,
+                    route_result.loai_van_ban_filter,
+                ),
             )
  
         # Phần lưu lịch sử — DÙNG CHUNG cho cả 2 nhánh, không trùng lặp code

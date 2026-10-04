@@ -412,10 +412,16 @@ class SummarizeService:
         target_documents: list[str] | None = None,
         full_enumeration: bool = False,
         document_type_filter: Sequence[str] | None = None,
+        document_ids: Sequence[str] | None = None,
     ) -> SummarizeResult:
-        target_document_ids = self._resolve_scope(
-            history_id, question, target_documents, document_type_filter
-        )
+        # document_ids do RagService đã resolve sẵn (graph + tên file) thì dùng
+        # luôn; _resolve_scope chỉ còn cho caller gọi trực tiếp service này.
+        if document_ids is not None:
+            target_document_ids = list(document_ids)
+        else:
+            target_document_ids = self._resolve_scope(
+                history_id, question, target_documents, document_type_filter
+            )
         chunks = self._get_chunks_for_documents(history_id, target_document_ids)
         deduped = self._dedupe_by_dieu(chunks)
         highlights, failed_groups = self._map_extractive(deduped, question, full_enumeration)

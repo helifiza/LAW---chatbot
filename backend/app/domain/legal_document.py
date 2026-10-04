@@ -44,3 +44,32 @@ def normalize_document_type_filter(values: Iterable[object] | None) -> tuple[str
         values = (values,)
     normalized = (normalize_document_type(value) for value in values or ())
     return tuple(dict.fromkeys(value for value in normalized if value))
+
+
+#hàm chuẩn hóa tên/số hiệu văn bản về chuỗi token không dấu, ví dụ
+#"Nghị định 15/2020/NĐ-CP" thành "nghi dinh 15 2020 nd cp".
+def reference_key(value: object) -> str:
+    plain = _plain(str(value or "").lower())
+    return re.sub(r"[^a-z0-9]+", " ", plain).strip()
+
+
+def contains_reference(haystack: object, needle: object) -> bool:
+    """needle nằm trong haystack theo biên token ("15 2020" không khớp "115 2020")."""
+    needle_key = reference_key(needle)
+    return bool(needle_key) and f" {needle_key} " in f" {reference_key(haystack)} "
+
+
+def matches_legal_reference(reference: str, document_number: object, *texts: object) -> bool:
+    """Khớp tên/số hiệu người dùng nêu với văn bản trong graph, theo 2 chiều:
+    - ref nằm trong số hiệu/tiêu đề ("15/2020" ~ "15/2020/NĐ-CP");
+    - số hiệu nằm trong ref ("Nghị định 15/2020/NĐ-CP" ~ "15/2020/NĐ-CP"). Chiều
+      này chỉ dùng khi số hiệu đủ đặc trưng (có chữ số, >= 2 token) để tránh số
+      hiệu cụt như "15" khớp nhầm mọi câu."""
+    if contains_reference(" ".join(str(text or "") for text in (document_number, *texts)), reference):
+        return True
+    number_key = reference_key(document_number)
+    return (
+        any(char.isdigit() for char in number_key)
+        and len(number_key.split()) >= 2
+        and contains_reference(reference, document_number)
+    )

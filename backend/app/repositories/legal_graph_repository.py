@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Iterator, Sequence
 
 from app.domain.models import utc_now
-from app.domain.legal_document import normalize_document_type_filter
+from app.domain.legal_document import (
+    matches_legal_reference,
+    normalize_document_type_filter,
+    reference_key,
+)
 
 
 RELATION_MIGRATION = {
@@ -333,16 +337,15 @@ class LegalGraphRepository:
         references: Sequence[str],
         document_type_filter: Sequence[str] | None = None,
     ) -> list[dict]:
-        def compact(value: object) -> str:
-            plain = "".join(c for c in unicodedata.normalize("NFD", str(value or "").lower())
-                            if unicodedata.category(c) != "Mn").replace("đ", "d")
-            return "".join(ch for ch in plain if ch.isalnum())
-        needles=[compact(r) for r in references if compact(r)]
+        needles = [r for r in references if reference_key(r)]
         docs=self.list_documents(history_id)
         allowed = set(normalize_document_type_filter(document_type_filter))
         if allowed:
             docs = [d for d in docs if d.get("document_type") in allowed]
-        return docs if not needles else [d for d in docs if any(n in compact(f"{d.get('document_number','')} {d.get('title','')}") for n in needles)]
+        return docs if not needles else [
+            d for d in docs
+            if any(matches_legal_reference(n, d.get("document_number"), d.get("title")) for n in needles)
+        ]
     def list_incoming_relation_details(self, history_id: str, target_id: str) -> list[dict]:
         return [r for r in self.list_relation_details(history_id) if r["target_document_id"]==target_id]
     def list_relation_provisions(self, history_id: str, limit: int|None=None, offset: int=0) -> list[dict]:
